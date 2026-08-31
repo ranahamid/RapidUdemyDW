@@ -1,0 +1,330 @@
+@page "/course/{CourseId:long}"
+@using RapidUdemyDW.Models
+@using RapidUdemyDW.Services
+@inject UdemyApiService Api
+@inject DownloadManager DlManager
+@inject NavigationManager Nav
+
+
+<div class="page-header">
+    <button class="btn btn-outline-secondary btn-sm me-2" @onclick="GoBack">← Back</button>
+    <h2 class="d-inline">@(_courseName ?? "Loading...")</h2>
+</div>
+
+@if (_loading)
+{
+    <div class="loading-overlay">
+        <div class="spinner-border text-primary" role="status"></div>
+        <p class="mt-2">Loading course content...</p>
+    </div>
+}
+else if (!string.IsNullOrEmpty(_error))
+{
+    <div class="alert alert-danger">⚠️ @_error</div>
+}
+else
+{
+    @if (_downloadStarted)
+    {
+        <div class="alert alert-success d-flex align-items-center justify-content-between">
+            <span>✅ Download started for <strong>@SelectedLectureCount lectures</strong> — running in background!</span>
+            <div>
+                <a href="downloads" class="btn btn-sm btn-success me-2">📥 View Downloads</a>
+                <button class="btn btn-sm btn-outline-secondary" @onclick="() => _downloadStarted = false">✖</button>
+            </div>
+        </div>
+    }
+
+    <!-- Chapter / Lecture Selection View -->
+    <div class="selection-toolbar mb-3">
+        <div class="d-flex flex-wrap gap-2 align-items-center">
+            <button class="btn btn-sm btn-outline-primary" @onclick="SelectAll">☑ Select All</button>
+            <button class="btn btn-sm btn-outline-secondary" @onclick="DeselectAll">☐ Deselect All</button>
+            <span class="ms-auto text-muted">
+                @SelectedLectureCount / @TotalLectureCount selected
+                @if (DownloadedLectureCount > 0)
+                {
+                    <span class="ms-2 text-success">(@DownloadedLectureCount already downloaded)</span>
+                }
+            </span>
+            <button class="btn btn-primary" @onclick="StartDownload" disabled="@(SelectedLectureCount == 0)">
+                ⬇️ Download Selected
+            </button>
+        </div>
+    </div>
+
+    <div class="chapter-list">
+        @foreach (var chapter in _chapters)
+        {
+            <div class="chapter-card">
+                <div class="chapter-header" @onclick="() => ToggleChapterExpand(chapter)">
+                    <div class="d-flex align-items-center">
+                        <input type="checkbox" class="form-check-input me-2"
+                               checked="@chapter.IsSelected"
+                               @onclick:stopPropagation="true"
+                               @onchange="e => ToggleChapter(chapter, (bool)(e.Value ?? false))" />
+                        <span class="expand-icon">@(IsExpanded(chapter) ? "▼" : "▶")</span>
+                        <strong class="ms-1">@chapter.Index. @chapter.Title</strong>
+                    </div>
+                    <div class="d-flex align-items-center gap-1">
+                        @{ var dlCount = chapter.Lectures.Count(l => l.IsDownloaded); }
+                        @if (dlCount > 0)
+                        {
+                            <span class="badge bg-success" style="font-size: 0.7rem;">@dlCount / @chapter.Lectures.Count ✅</span>
+                        }
+                        else
+                        {
+                            <span class="badge bg-secondary">@chapter.Lectures.Count lectures</span>
+                        }
+                    </div>
+                </div>
+
+                @if (IsExpanded(chapter))
+                {
+                    <div class="lecture-list">
+                        @foreach (var lecture in chapter.Lectures)
+                        {
+                            <div class="lecture-item @(lecture.IsDownloaded ? "lecture-downloaded" : "")">
+                                <input type="checkbox" class="form-check-input me-2"
+                                       checked="@lecture.IsSelected"
+                                       @onchange="e => lecture.IsSelected = (bool)(e.Value ?? false)" />
+                                <span class="lecture-type-icon">@GetAssetTypeIcon(lecture.AssetType)</span>
+                                <span class="lecture-title">@lecture.Index. @lecture.Title</span>
+                                @if (lecture.IsDownloaded)
+                                {
+                                    <span class="badge bg-success ms-2" style="font-size: 0.7rem;">✅ Downloaded</span>
+                                }
+                                <span class="lecture-duration ms-auto">@lecture.DurationDisplay</span>
+                            </div>
+                        }
+                    </div>
+                }
+            </div>
+        }
+    </div>
+}
+
+@code {
+    [Parameter] public long CourseId { get; set; }
+
+    private string? _courseName;
+    private bool _loading = true;
+    private string? _error;
+    private bool _downloadStarted;
+    private List<CourseChapter> _chapters = [];
+    private HashSet<long> _expandedChapters = [];
+
+    private int TotalLectureCount => _chapters.Sum(c => c.Lectures.Count);
+    private int SelectedLectureCount => _chapters
+        .Where(c => c.IsSelected)
+        .Sum(c => c.Lectures.Count(l => l.IsSelected));
+
+    protected override async Task OnInitializedAsync()
+    {
+        if (!Api.HasToken)
+        {
+            var prefs = await SettingsHelper.LoadAsync();
+            if (!string.IsNullOrWhiteSpace(prefs.AccessToken))
+            {
+                Api.SetAccessToken(prefs.AccessToken);
+                DlManager.SetAccessToken(prefs.AccessToken);
+            }
+            else
+            {
+                Nav.NavigateTo("settings");
+                return;
+            }
+        }
+
+        await LoadCurriculum();
+    }
+
+    private async Task LoadCurriculum()
+    {
+        _loading = true;
+        StateHasChanged();
+
+        try
+        {
+            var items = await Api.GetCurriculumAsync(CourseId);
+
+            int chapterIdx = 0;
+            int lectureIdx = 0;
+            CourseChapter? currentChapter = null;
+
+            foreach (var item in items)
+            {
+                if (item.IsChapter)
+                {
+                    chapterIdx++;
+                    lectureIdx = 0;
+                    currentChapter = new CourseChapter
+                    {
+                        Id = item.Id,
+                        Index = chapterIdx,
+                        Title = item.Title,
+                        IsSelected = true
+                    };
+                    _chapters.Add(currentChapter);
+                }
+                else if (item.IsLecture && item.IsPublished)
+                {
+                    if (currentChapter == null)
+                    {
+                        chapterIdx++;
+                        lectureIdx = 0;
+                        currentChapter = new CourseChapter
+                        {
+                            Id = 0,
+                            Index = chapterIdx,
+                            Title = "Introduction",
+                            IsSelected = true
+                        };
+                        _chapters.Add(currentChapter);
+                    }
+
+                    lectureIdx++;
+                    currentChapter.Lectures.Add(new CourseLecture
+                    {
+                        Id = item.Id,
+                        Index = lectureIdx,
+                        Title = item.Title,
+                        AssetType = item.Asset?.AssetType ?? "Unknown",
+                        DurationSeconds = item.Asset?.TimeEstimation ?? 0,
+                        IsSelected = true
+                    });
+                }
+            }
+
+            // Fetch course name using the single-course endpoint
+            _courseName = $"Course #{CourseId}";
+            try
+            {
+                var course = await Api.GetCourseInfoAsync(CourseId);
+                if (course != null) _courseName = course.Title;
+            }
+            catch { }
+
+            // Scan download folder for already-downloaded files
+            await ScanExistingFiles();
+
+            // Expand first chapter by default
+            if (_chapters.Count > 0)
+                _expandedChapters.Add(_chapters[0].Id);
+        }
+        catch (Exception ex)
+        {
+            _error = ex.Message;
+        }
+        finally
+        {
+            _loading = false;
+            StateHasChanged();
+        }
+    }
+
+    private int DownloadedLectureCount => _chapters.Sum(c => c.Lectures.Count(l => l.IsDownloaded));
+
+    private async Task ScanExistingFiles()
+    {
+        try
+        {
+            var settings = await SettingsHelper.LoadAsync();
+            var downloadPath = string.IsNullOrWhiteSpace(settings.DownloadPath)
+                ? Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), "Downloads", "UdemyCourses")
+                : settings.DownloadPath;
+
+            var safeCourseName = DownloadManager.SanitizeFileName(_courseName ?? $"Course_{CourseId}");
+            var coursePath = Path.Combine(downloadPath, safeCourseName);
+
+            if (!Directory.Exists(coursePath)) return;
+
+            // Build a set of existing filenames (without extension) for fast lookup
+            var existingFiles = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            foreach (var file in Directory.EnumerateFiles(coursePath, "*", SearchOption.AllDirectories))
+            {
+                if (new FileInfo(file).Length > 1024) // Skip tiny/empty files
+                    existingFiles.Add(Path.GetFileNameWithoutExtension(file));
+            }
+
+            // Match lectures against existing files
+            foreach (var chapter in _chapters)
+            {
+                foreach (var lecture in chapter.Lectures)
+                {
+                    var safeName = DownloadManager.SanitizeFileName($"{lecture.Index:D2} - {lecture.Title}");
+                    if (existingFiles.Contains(safeName))
+                    {
+                        lecture.IsDownloaded = true;
+                        lecture.IsSelected = false; // Auto-deselect already downloaded
+                    }
+                }
+            }
+        }
+        catch { /* non-critical */ }
+    }
+
+    private async Task StartDownload()
+    {
+        var settings = await SettingsHelper.LoadAsync();
+        var downloadPath = string.IsNullOrWhiteSpace(settings.DownloadPath)
+            ? Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), "Downloads", "UdemyCourses")
+            : settings.DownloadPath;
+
+        DlManager.StartNewJob(
+            CourseId,
+            _courseName ?? $"Course_{CourseId}",
+            _chapters,
+            downloadPath,
+            settings.PreferredQuality,
+            settings.DownloadCaptions,
+            settings.CaptionLanguage,
+            settings.SkipExistingFiles);
+
+        _downloadStarted = true;
+        StateHasChanged();
+    }
+
+    private void SelectAll()
+    {
+        foreach (var ch in _chapters)
+        {
+            ch.IsSelected = true;
+            foreach (var l in ch.Lectures) l.IsSelected = true;
+        }
+    }
+
+    private void DeselectAll()
+    {
+        foreach (var ch in _chapters)
+        {
+            ch.IsSelected = false;
+            foreach (var l in ch.Lectures) l.IsSelected = false;
+        }
+    }
+
+    private void ToggleChapter(CourseChapter chapter, bool selected)
+    {
+        chapter.IsSelected = selected;
+        foreach (var l in chapter.Lectures) l.IsSelected = selected;
+    }
+
+    private void ToggleChapterExpand(CourseChapter chapter)
+    {
+        if (!_expandedChapters.Remove(chapter.Id))
+            _expandedChapters.Add(chapter.Id);
+    }
+
+    private bool IsExpanded(CourseChapter chapter) => _expandedChapters.Contains(chapter.Id);
+
+    private void GoBack() => Nav.NavigateTo("/");
+
+    private static string GetAssetTypeIcon(string assetType) => assetType switch
+    {
+        "Video" => "🎬",
+        "Article" => "📄",
+        "File" or "E-Book" => "📎",
+        _ => "📦"
+    };
+
+}

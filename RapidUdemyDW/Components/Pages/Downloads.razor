@@ -1,0 +1,369 @@
+@page "/downloads"
+@using RapidUdemyDW.Models
+@using RapidUdemyDW.Services
+@inject DownloadManager DlManager
+@inject DownloadHistoryService History
+@inject NavigationManager Nav
+@implements IDisposable
+
+<div class="page-header">
+    <h2>📥 Downloads</h2>
+</div>
+
+<!-- Tabs -->
+<ul class="nav nav-tabs mb-3">
+    <li class="nav-item">
+        <button class="nav-link @(_activeTab == "active" ? "active" : "")" @onclick='() => _activeTab = "active"'>
+            🔄 Active
+            @if (DlManager.Tasks.Count > 0)
+            {
+                <span class="badge bg-primary ms-1">@DlManager.Tasks.Count</span>
+            }
+        </button>
+    </li>
+    <li class="nav-item">
+        <button class="nav-link @(_activeTab == "history" ? "active" : "")" @onclick='() => { _activeTab = "history"; _ = LoadHistory(); }'>
+            📋 History
+            @if (_sessions.Count > 0)
+            {
+                <span class="badge bg-secondary ms-1">@_sessions.Count</span>
+            }
+        </button>
+    </li>
+</ul>
+
+@if (_activeTab == "active")
+{
+    <!-- ── Active Downloads Tab ──────────────────────────────── -->
+    @if (DlManager.Jobs.Count == 0)
+    {
+        <div class="alert alert-info">
+            <p class="mb-0">No downloads in progress. Go to a course and start downloading!</p>
+        </div>
+    }
+    else
+    {
+        <div class="d-flex justify-content-end gap-2 mb-2">
+            @if (DlManager.Jobs.Any(j => !j.IsRunning && j.FailedTasks > 0))
+            {
+                <button class="btn btn-outline-warning btn-sm" @onclick="() => DlManager.RetryAllFailed()">🔄 Retry All Failed</button>
+            }
+            @if (DlManager.Jobs.Any(j => !j.IsRunning))
+            {
+                <button class="btn btn-outline-danger btn-sm" @onclick="ClearCompleted">🗑️ Clear Completed</button>
+            }
+        </div>
+
+        @foreach (var job in DlManager.Jobs)
+        {
+            <div class="download-job-card @(job.IsRunning ? "job-active" : job.IsComplete ? "job-complete" : "")">
+                <div class="job-header">
+                    <div>
+                        <strong>📚 @job.CourseName</strong>
+                        <div class="text-muted" style="font-size: 0.8rem;">
+                            Started @job.StartedAt.ToLocalTime().ToString("h:mm tt")
+                            &nbsp;·&nbsp; @job.CompletedTasks / @job.TotalTasks files
+                        </div>
+                    </div>
+                    <div class="d-flex align-items-center gap-1">
+                        @if (job.IsRunning)
+                        {
+                            @if (job.IsPaused)
+                            {
+                                <button class="btn btn-success btn-sm" @onclick="() => DlManager.ResumeJob(job)">▶</button>
+                            }
+                            else
+                            {
+                                <button class="btn btn-warning btn-sm" @onclick="() => DlManager.PauseJob(job)">⏸</button>
+                            }
+                            <button class="btn btn-danger btn-sm" @onclick="() => DlManager.CancelJob(job)">✖</button>
+                        }
+                        else
+                        {
+                            @if (job.FailedTasks > 0)
+                            {
+                                <button class="btn btn-warning btn-sm" title="Retry failed" @onclick="() => DlManager.RetryFailed(job)">🔄</button>
+                            }
+                            <button class="btn btn-outline-danger btn-sm" @onclick="() => DlManager.RemoveJob(job)">🗑️</button>
+                        }
+                        <button class="btn btn-outline-secondary btn-sm" @onclick="() => ToggleJobExpand(job.Id)">
+                            @(IsJobExpanded(job.Id) ? "▼" : "▶")
+                        </button>
+                    </div>
+                </div>
+
+                <div class="progress mx-3 mb-2" style="height: 6px;">
+                    <div class="progress-bar bg-success" style="width: @($"{job.OverallProgress:F0}")%"></div>
+                </div>
+
+                @if (job.FailedTasks > 0)
+                {
+                    <div class="mx-3 mb-2 d-flex align-items-center gap-2">
+                        <small class="text-danger">❌ @job.FailedTasks failed</small>
+                        @if (!job.IsRunning)
+                        {
+                            <button class="btn btn-outline-warning btn-sm" style="font-size: 0.75rem; padding: 0.1rem 0.5rem;"
+                                    @onclick="() => DlManager.RetryFailed(job)">
+                                🔄 Retry Failed
+                            </button>
+                        }
+                    </div>
+                }
+
+                @if (IsJobExpanded(job.Id))
+                {
+                    <div class="job-tasks-list">
+                        @foreach (var task in job.Tasks)
+                        {
+                            <div class="download-task-item @GetTaskCssClass(task)">
+                                <div class="d-flex justify-content-between align-items-center">
+                                    <div class="task-info">
+                                        <span class="task-status-icon">@GetStatusIcon(task.Status)</span>
+                                        <span>@task.DisplayName</span>
+                                    </div>
+                                    <span class="task-size">@task.DownloadedDisplay</span>
+                                </div>
+                                @if (task.Status == DownloadStatus.Downloading)
+                                {
+                                    <div class="progress mt-1" style="height: 4px;">
+                                        <div class="progress-bar progress-bar-striped progress-bar-animated"
+                                             style="width: @($"{task.ProgressPercent:F0}")%"></div>
+                                    </div>
+                                }
+                                @if (!string.IsNullOrEmpty(task.ErrorMessage))
+                                {
+                                    <div class="d-flex align-items-center gap-2">
+                                        <small class="text-muted">@task.ErrorMessage</small>
+                                        @if (task.Status == DownloadStatus.Failed && !job.IsRunning)
+                                        {
+                                            <button class="btn btn-outline-warning btn-sm" style="font-size: 0.65rem; padding: 0 0.4rem;"
+                                                    @onclick="() => DlManager.RetrySingleTask(job, task)">🔄</button>
+                                        }
+                                    </div>
+                                }
+                            </div>
+                        }
+                    </div>
+                }
+            </div>
+        }
+    }
+}
+else
+{
+    <!-- ── History Tab ───────────────────────────────────────── -->
+    @if (!string.IsNullOrEmpty(_retryMessage))
+    {
+        <div class="alert @(_retryMessage.StartsWith("✅") ? "alert-success" : "alert-danger") alert-dismissible mb-3">
+            @_retryMessage
+            <button type="button" class="btn-close" @onclick="() => _retryMessage = null"></button>
+        </div>
+    }
+    @if (_sessions.Count == 0)
+    {
+        <div class="alert alert-info">
+            <p class="mb-0">No download history yet. Completed downloads will appear here.</p>
+        </div>
+    }
+    else
+    {
+        <div class="d-flex justify-content-end mb-2">
+            <button class="btn btn-outline-danger btn-sm" @onclick="ClearHistory">🗑️ Clear All History</button>
+        </div>
+
+        <div class="history-list">
+            @foreach (var session in _sessions)
+            {
+                <div class="history-session-card">
+                    <div class="history-session-header" @onclick="() => ToggleSession(session.Id)">
+                        <div>
+                            <strong>📚 @session.CourseName</strong>
+                            <div class="text-muted" style="font-size: 0.8rem;">
+                                @session.StartedAt.ToLocalTime().ToString("MMM dd, yyyy — h:mm tt")
+                                &nbsp;·&nbsp; @session.TotalFiles files
+                                &nbsp;·&nbsp; @session.TotalSizeDisplay
+                            </div>
+                        </div>
+                        <div class="d-flex align-items-center gap-1" @onclick:stopPropagation="true">
+                            <span style="font-size: 0.85rem;" class="me-1">@session.StatusSummary</span>
+                            <button class="btn btn-outline-primary btn-sm" title="Retry failed/missing files"
+                                    disabled="@_retrying"
+                                    @onclick="() => RetrySession(session)">
+                                @if (_retrying) { <span class="spinner-border spinner-border-sm"></span> } else { <span>🔄</span> }
+                            </button>
+                            <button class="btn btn-outline-danger btn-sm" title="Delete from history"
+                                    @onclick="() => DeleteSession(session.Id)">🗑️</button>
+                            <span class="expand-icon" style="cursor:pointer;" @onclick="() => ToggleSession(session.Id)">@(IsSessionExpanded(session.Id) ? "\u25bc" : "\u25b6")</span>
+                        </div>
+                    </div>
+
+                    @if (IsSessionExpanded(session.Id))
+                    {
+                        <div class="history-session-files">
+                            @foreach (var file in session.Files)
+                            {
+                                <div class="history-file-item @GetHistoryFileCssClass(file.Status)">
+                                    <div class="d-flex justify-content-between align-items-center">
+                                        <div class="task-info">
+                                            <span class="task-status-icon">@GetStatusIcon(file.Status)</span>
+                                            <span>@file.DisplayName</span>
+                                        </div>
+                                        <span class="task-size">@file.FileSizeDisplay</span>
+                                    </div>
+                                    @if (!string.IsNullOrEmpty(file.ErrorMessage))
+                                    {
+                                        <small class="text-danger">@file.ErrorMessage</small>
+                                    }
+                                </div>
+                            }
+                        </div>
+                        <div class="history-session-footer">
+                            <button class="btn btn-primary btn-sm me-2" @onclick="() => RetrySession(session)">
+                                🔄 Retry Failed / Missing
+                            </button>
+                            <button class="btn btn-outline-primary btn-sm me-2" @onclick="() => RedownloadCourse(session.CourseId)">
+                                📚 Re-select & Download
+                            </button>
+                            <button class="btn btn-outline-danger btn-sm" @onclick="() => DeleteSession(session.Id)">
+                                🗑️ Delete from History
+                            </button>
+                        </div>
+                    }
+                </div>
+            }
+        </div>
+    }
+}
+
+@code {
+    private string _activeTab = "active";
+    private List<DownloadSession> _sessions = [];
+    private HashSet<string> _expandedSessions = [];
+    private HashSet<string> _expandedJobs = [];
+
+    protected override async Task OnInitializedAsync()
+    {
+        DlManager.OnStateChanged += HandleStateChanged;
+        await LoadHistory();
+
+        // Auto-expand running jobs
+        foreach (var job in DlManager.Jobs.Where(j => j.IsRunning))
+            _expandedJobs.Add(job.Id);
+    }
+
+    private async Task LoadHistory()
+    {
+        var all = await History.GetSessionsAsync();
+        // Filter out courses that are currently in active jobs
+        var activeCourseIds = DlManager.Jobs.Select(j => j.CourseId).ToHashSet();
+        _sessions = all.Where(s => !activeCourseIds.Contains(s.CourseId)).ToList();
+        StateHasChanged();
+    }
+
+    private void ClearCompleted()
+    {
+        var completed = DlManager.Jobs.Where(j => !j.IsRunning).ToList();
+        foreach (var j in completed) DlManager.Jobs.Remove(j);
+        StateHasChanged();
+    }
+
+    private bool _retrying;
+    private string? _retryMessage;
+
+    private async Task RetrySession(DownloadSession session)
+    {
+        _retrying = true;
+        _retryMessage = null;
+        StateHasChanged();
+
+        try
+        {
+            var job = await DlManager.RetryFromHistoryAsync(session);
+            if (job != null)
+            {
+                _activeTab = "active";
+                _expandedJobs.Add(job.Id);
+            }
+            else
+            {
+                _retryMessage = "✅ All files already exist on disk — nothing to re-download!";
+            }
+        }
+        catch (Exception ex)
+        {
+            _retryMessage = $"❌ Error: {ex.Message}";
+        }
+        finally
+        {
+            _retrying = false;
+            StateHasChanged();
+        }
+    }
+
+    private void RedownloadCourse(long courseId)
+    {
+        Nav.NavigateTo($"course/{courseId}");
+    }
+
+    private void ToggleJobExpand(string id)
+    {
+        if (!_expandedJobs.Remove(id)) _expandedJobs.Add(id);
+    }
+
+    private bool IsJobExpanded(string id) => _expandedJobs.Contains(id);
+
+    private async Task ClearHistory()
+    {
+        await History.ClearAllAsync();
+        _sessions = [];
+        _expandedSessions.Clear();
+        StateHasChanged();
+    }
+
+    private async Task DeleteSession(string sessionId)
+    {
+        await History.DeleteSessionAsync(sessionId);
+        _sessions.RemoveAll(s => s.Id == sessionId);
+        _expandedSessions.Remove(sessionId);
+        StateHasChanged();
+    }
+
+    private void ToggleSession(string id)
+    {
+        if (!_expandedSessions.Remove(id))
+            _expandedSessions.Add(id);
+    }
+
+    private bool IsSessionExpanded(string id) => _expandedSessions.Contains(id);
+
+    private void HandleStateChanged() => InvokeAsync(StateHasChanged);
+
+    private static string GetStatusIcon(DownloadStatus status) => status switch
+    {
+        DownloadStatus.Queued => "⏳",
+        DownloadStatus.Downloading => "📥",
+        DownloadStatus.Completed => "✅",
+        DownloadStatus.Failed => "❌",
+        DownloadStatus.Skipped => "⏭️",
+        _ => "❓"
+    };
+
+    private static string GetTaskCssClass(DownloadTask task) => task.Status switch
+    {
+        DownloadStatus.Completed => "task-completed",
+        DownloadStatus.Failed => "task-failed",
+        DownloadStatus.Downloading => "task-active",
+        DownloadStatus.Skipped => "task-skipped",
+        _ => ""
+    };
+
+    private static string GetHistoryFileCssClass(DownloadStatus status) => status switch
+    {
+        DownloadStatus.Completed => "task-completed",
+        DownloadStatus.Failed => "task-failed",
+        DownloadStatus.Skipped => "task-skipped",
+        _ => ""
+    };
+
+    public void Dispose() => DlManager.OnStateChanged -= HandleStateChanged;
+}

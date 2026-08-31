@@ -1,0 +1,539 @@
+using System.Net.Http.Headers;
+using System.Text.RegularExpressions;
+using RapidUdemyDW.Models;
+
+namespace RapidUdemyDW.Services;
+
+/// <summary>
+/// Multi-job download manager. Supports multiple concurrent course downloads
+/// running in the background while the user browses and queues more.
+/// </summary>
+public partial class DownloadManager
+{
+    private readonly UdemyApiService _api;
+    private readonly HttpClient _http;
+    private readonly SemaphoreSlim _semaphore = new(3, 3);
+
+    // History tracking
+    private DownloadHistoryService? _history;
+
+    public event Action? OnStateChanged;
+
+    /// <summary>All active/completed download jobs.</summary>
+    public List<DownloadJob> Jobs { get; } = [];
+
+    // Legacy compat — these aggregate across all jobs
+    public List<DownloadTask> Tasks => Jobs.SelectMany(j => j.Tasks).ToList();
+    public bool IsRunning => Jobs.Any(j => j.IsRunning);
+    public int TotalTasks => Jobs.Sum(j => j.TotalTasks);
+    public int CompletedTasks => Jobs.Sum(j => j.CompletedTasks);
+    public int FailedTasks => Jobs.Sum(j => j.FailedTasks);
+    public double OverallProgress => TotalTasks > 0 ? CompletedTasks * 100.0 / TotalTasks : 0;
+    public bool IsPaused => false; // Per-job now
+
+    public int ActiveJobCount => Jobs.Count(j => j.IsRunning);
+
+    public DownloadManager(UdemyApiService api, HttpClient httpClient)
+    {
+        _api = api;
+        _http = httpClient;
+        _http.Timeout = TimeSpan.FromHours(2);
+    }
+
+    public void SetHistoryService(DownloadHistoryService history) => _history = history;
+
+    public void SetAccessToken(string token)
+    {
+        _http.DefaultRequestHeaders.Authorization =
+            new AuthenticationHeaderValue("Bearer", token);
+    }
+
+    /// <summary>
+    /// Create a new download job for a course and start it immediately in the background.
+    /// Returns the job so the UI can track it.
+    /// </summary>
+    public DownloadJob StartNewJob(
+        long courseId,
+        string courseName,
+        List<CourseChapter> chapters,
+        string downloadPath,
+        string preferredQuality,
+        bool downloadCaptions,
+        string captionLang,
+        bool skipExisting)
+    {
+        var safeCourseName = SanitizeFileName(courseName);
+        var coursePath = Path.Combine(downloadPath, safeCourseName);
+
+        var job = new DownloadJob
+        {
+            CourseId = courseId,
+            CourseName = courseName,
+            PreferredQuality = preferredQuality,
+            DownloadCaptions = downloadCaptions,
+            CaptionLanguage = captionLang,
+            SkipExisting = skipExisting,
+            StartedAt = DateTime.UtcNow
+        };
+
+        foreach (var chapter in chapters.Where(c => c.IsSelected))
+        {
+            var safeChapterName = SanitizeFileName($"{chapter.Index:D2} - {chapter.Title}");
+            var chapterPath = Path.Combine(coursePath, safeChapterName);
+
+            foreach (var lecture in chapter.Lectures.Where(l => l.IsSelected))
+            {
+                job.Tasks.Add(new DownloadTask
+                {
+                    LectureId = lecture.Id,
+                    ChapterTitle = chapter.Title,
+                    LectureTitle = lecture.Title,
+                    ChapterIndex = chapter.Index,
+                    LectureIndex = lecture.Index,
+                    FileName = Path.Combine(chapterPath,
+                        SanitizeFileName($"{lecture.Index:D2} - {lecture.Title}"))
+                });
+            }
+        }
+
+        Jobs.Insert(0, job);
+        NotifyStateChanged();
+
+        // Fire and forget — runs in background
+        _ = RunJobAsync(job);
+
+        return job;
+    }
+
+    private async Task RunJobAsync(DownloadJob job)
+    {
+        job.IsRunning = true;
+        job.Cts = new CancellationTokenSource();
+        var ct = job.Cts.Token;
+
+        // Create history session
+        DownloadSession? session = null;
+        if (_history != null)
+            session = await _history.StartSessionAsync(job.CourseId, job.CourseName, job.TotalTasks);
+
+        var queued = job.Tasks.Where(t => t.Status is DownloadStatus.Queued or DownloadStatus.Failed).ToList();
+        var parallelTasks = queued.Select(t => DownloadLectureAsync(job, t, session, ct));
+
+        try
+        {
+            await Task.WhenAll(parallelTasks);
+        }
+        catch (OperationCanceledException) { }
+        finally
+        {
+            job.IsRunning = false;
+            NotifyStateChanged();
+        }
+    }
+
+    /// <summary>Retry all failed tasks in a job.</summary>
+    public void RetryFailed(DownloadJob job)
+    {
+        if (job.IsRunning) return;
+
+        // Reset failed tasks to Queued
+        foreach (var t in job.Tasks.Where(t => t.Status == DownloadStatus.Failed))
+        {
+            t.Status = DownloadStatus.Queued;
+            t.ProgressPercent = 0;
+            t.DownloadedBytes = 0;
+            t.TotalBytes = 0;
+            t.ErrorMessage = null;
+        }
+
+        // Re-run the job
+        _ = RunJobAsync(job);
+        NotifyStateChanged();
+    }
+
+    /// <summary>Retry all failed tasks across all jobs.</summary>
+    public void RetryAllFailed()
+    {
+        foreach (var job in Jobs.Where(j => !j.IsRunning && j.FailedTasks > 0))
+            RetryFailed(job);
+    }
+
+    /// <summary>Retry a single failed task within a job.</summary>
+    public void RetrySingleTask(DownloadJob job, DownloadTask task)
+    {
+        if (task.Status != DownloadStatus.Failed) return;
+
+        task.Status = DownloadStatus.Queued;
+        task.ProgressPercent = 0;
+        task.DownloadedBytes = 0;
+        task.TotalBytes = 0;
+        task.ErrorMessage = null;
+
+        // If job isn't running, start it to pick up this task
+        if (!job.IsRunning)
+            _ = RunJobAsync(job);
+
+        NotifyStateChanged();
+    }
+
+    public void PauseJob(DownloadJob job)
+    {
+        job.IsPaused = true;
+        NotifyStateChanged();
+    }
+
+    public void ResumeJob(DownloadJob job)
+    {
+        job.IsPaused = false;
+        NotifyStateChanged();
+    }
+
+    public void CancelJob(DownloadJob job)
+    {
+        job.Cts?.Cancel();
+        job.IsPaused = false;
+        job.IsRunning = false;
+        foreach (var t in job.Tasks.Where(t => t.Status is DownloadStatus.Queued or DownloadStatus.Downloading))
+            t.Status = DownloadStatus.Failed;
+        NotifyStateChanged();
+    }
+
+    public void RemoveJob(DownloadJob job)
+    {
+        if (job.IsRunning) CancelJob(job);
+        Jobs.Remove(job);
+        NotifyStateChanged();
+    }
+
+    /// <summary>
+    /// Retry failed/missing files from a history session — no navigation, starts downloading immediately.
+    /// Re-fetches the curriculum to get accurate lecture IDs, then downloads only files
+    /// that are failed or missing from disk.
+    /// </summary>
+    public async Task<DownloadJob?> RetryFromHistoryAsync(DownloadSession session)
+    {
+        var settings = await SettingsHelper.LoadAsync();
+        var downloadPath = string.IsNullOrWhiteSpace(settings.DownloadPath)
+            ? Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), "Downloads", "UdemyCourses")
+            : settings.DownloadPath;
+
+        var safeCourseName = SanitizeFileName(session.CourseName);
+        var coursePath = Path.Combine(downloadPath, safeCourseName);
+
+        // Build set of files that already exist on disk
+        var existingFiles = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        if (Directory.Exists(coursePath))
+        {
+            foreach (var file in Directory.EnumerateFiles(coursePath, "*", SearchOption.AllDirectories))
+            {
+                if (new FileInfo(file).Length > 1024)
+                    existingFiles.Add(Path.GetFileNameWithoutExtension(file));
+            }
+        }
+
+        // Fetch full curriculum from API to get lecture IDs
+        var curriculumItems = await _api.GetCurriculumAsync(session.CourseId);
+
+        var job = new DownloadJob
+        {
+            CourseId = session.CourseId,
+            CourseName = session.CourseName,
+            PreferredQuality = settings.PreferredQuality,
+            DownloadCaptions = settings.DownloadCaptions,
+            CaptionLanguage = settings.CaptionLanguage,
+            SkipExisting = true,
+            StartedAt = DateTime.UtcNow
+        };
+
+        int chapterIdx = 0, lectureIdx = 0;
+        string currentChapterTitle = "";
+        string currentChapterPath = coursePath;
+
+        foreach (var item in curriculumItems)
+        {
+            if (item.IsChapter)
+            {
+                chapterIdx++;
+                lectureIdx = 0;
+                currentChapterTitle = item.Title;
+                currentChapterPath = Path.Combine(coursePath,
+                    SanitizeFileName($"{chapterIdx:D2} - {item.Title}"));
+            }
+            else if (item.IsLecture && item.IsPublished)
+            {
+                lectureIdx++;
+                var safeName = SanitizeFileName($"{lectureIdx:D2} - {item.Title}");
+
+                // Skip if file already exists on disk
+                if (existingFiles.Contains(safeName))
+                    continue;
+
+                job.Tasks.Add(new DownloadTask
+                {
+                    LectureId = item.Id,
+                    ChapterTitle = currentChapterTitle,
+                    LectureTitle = item.Title,
+                    ChapterIndex = chapterIdx,
+                    LectureIndex = lectureIdx,
+                    FileName = Path.Combine(currentChapterPath, safeName)
+                });
+            }
+        }
+
+        if (job.Tasks.Count == 0) return null;
+
+        Jobs.Insert(0, job);
+        NotifyStateChanged();
+        _ = RunJobAsync(job);
+        return job;
+    }
+
+    // Legacy compat
+    public void Pause() { foreach (var j in Jobs.Where(j => j.IsRunning)) PauseJob(j); }
+    public void Resume() { foreach (var j in Jobs.Where(j => j.IsPaused)) ResumeJob(j); }
+    public void Cancel() { foreach (var j in Jobs.Where(j => j.IsRunning)) CancelJob(j); }
+
+    // ── Per-task download logic ──────────────────────────────────
+
+    private async Task DownloadLectureAsync(DownloadJob job, DownloadTask task, DownloadSession? session, CancellationToken ct)
+    {
+        await _semaphore.WaitAsync(ct);
+        try
+        {
+            while (job.IsPaused && !ct.IsCancellationRequested)
+                await Task.Delay(500, ct);
+            ct.ThrowIfCancellationRequested();
+
+            task.Status = DownloadStatus.Downloading;
+            NotifyStateChanged();
+
+            var lecture = await _api.GetLectureAsync(job.CourseId, task.LectureId);
+            if (lecture?.Asset == null)
+            {
+                task.Status = DownloadStatus.Skipped;
+                task.ErrorMessage = "No asset data available";
+                NotifyStateChanged();
+                return;
+            }
+
+            var asset = lecture.Asset;
+
+            if (asset.AssetType == "Video")
+                await DownloadVideoAsync(job, task, asset, ct);
+            else if (asset.AssetType == "Article")
+                await SaveArticleAsync(task, asset);
+            else if (asset.AssetType is "File" or "E-Book")
+                await DownloadFileAssetAsync(task, asset, job.SkipExisting, ct);
+            else
+            {
+                task.Status = DownloadStatus.Skipped;
+                task.ErrorMessage = $"Unsupported asset type: {asset.AssetType}";
+            }
+
+            if (job.DownloadCaptions && asset.Captions?.Count > 0)
+                await DownloadCaptionsAsync(task, asset.Captions, job.CaptionLanguage, ct);
+
+            if (task.Status == DownloadStatus.Downloading)
+                task.Status = DownloadStatus.Completed;
+        }
+        catch (OperationCanceledException)
+        {
+            task.Status = DownloadStatus.Failed;
+            task.ErrorMessage = "Cancelled";
+        }
+        catch (Exception ex)
+        {
+            task.Status = DownloadStatus.Failed;
+            task.ErrorMessage = ex.Message;
+        }
+        finally
+        {
+            _semaphore.Release();
+
+            if (_history != null && session != null &&
+                task.Status is DownloadStatus.Completed or DownloadStatus.Failed or DownloadStatus.Skipped)
+            {
+                try { await _history.RecordFileAsync(session, task); } catch { }
+            }
+
+            NotifyStateChanged();
+        }
+    }
+
+    private async Task DownloadVideoAsync(DownloadJob job, DownloadTask task, UdemyAsset asset, CancellationToken ct)
+    {
+        string? videoUrl = null;
+        string? hlsUrl = null;
+        string ext = ".mp4";
+
+        if (asset.DownloadUrls?.Video is { Count: > 0 })
+        {
+            var vids = asset.DownloadUrls.Video.OrderByDescending(v => ParseResolution(v.Label)).ToList();
+            var preferred = vids.FirstOrDefault(v => v.Label == job.PreferredQuality) ?? vids.First();
+            videoUrl = preferred.Src;
+        }
+
+        if (string.IsNullOrEmpty(videoUrl) && asset.MediaSources is { Count: > 0 })
+        {
+            var mp4Sources = asset.MediaSources.Where(m => m.Type == "video/mp4")
+                .OrderByDescending(m => ParseResolution(m.Label)).ToList();
+            if (mp4Sources.Count > 0)
+            {
+                var preferred = mp4Sources.FirstOrDefault(m => m.Label == job.PreferredQuality) ?? mp4Sources.First();
+                videoUrl = preferred.Src;
+            }
+        }
+
+        if (string.IsNullOrEmpty(videoUrl) && asset.MediaSources is { Count: > 0 })
+        {
+            var hls = asset.MediaSources.FirstOrDefault(m => m.Type == "application/x-mpegURL");
+            if (hls != null) hlsUrl = hls.Src;
+        }
+
+        var isHls = !string.IsNullOrEmpty(hlsUrl) && string.IsNullOrEmpty(videoUrl);
+        if (isHls) ext = ".ts";
+
+        var filePath = task.FileName + ext;
+        var altPath = task.FileName + (isHls ? ".mp4" : ".ts");
+
+        if (job.SkipExisting &&
+            ((File.Exists(filePath) && new FileInfo(filePath).Length > 1024) ||
+             (File.Exists(altPath) && new FileInfo(altPath).Length > 1024)))
+        {
+            task.Status = DownloadStatus.Completed;
+            task.ProgressPercent = 100;
+            task.ErrorMessage = "Already exists";
+            return;
+        }
+
+        if (!string.IsNullOrEmpty(videoUrl))
+            await DownloadFileWithProgressAsync(videoUrl, filePath, task, job, ct);
+        else if (!string.IsNullOrEmpty(hlsUrl))
+            await HlsDownloader.DownloadAsync(_http, hlsUrl, filePath, job.PreferredQuality,
+                task, () => job.IsPaused, NotifyStateChanged, ct);
+        else
+        {
+            task.Status = DownloadStatus.Skipped;
+            task.ErrorMessage = "No downloadable video source found";
+        }
+    }
+
+    private async Task SaveArticleAsync(DownloadTask task, UdemyAsset asset)
+    {
+        var filePath = task.FileName + ".html";
+        var dir = Path.GetDirectoryName(filePath);
+        if (!string.IsNullOrEmpty(dir)) Directory.CreateDirectory(dir);
+
+        var title = System.Net.WebUtility.HtmlEncode(task.LectureTitle);
+        var body = asset.Body ?? "<p>No content available.</p>";
+        var html = "<!DOCTYPE html><html><head>" +
+            "<meta charset=\"utf-8\">" +
+            $"<title>{title}</title>" +
+            "<style>body{ font-family: Arial, sans-serif; max-width: 800px; margin: 20px auto; padding: 0 20px; }</style>" +
+            "</head><body>" +
+            $"<h1>{title}</h1>" + body +
+            "</body></html>";
+
+        await File.WriteAllTextAsync(filePath, html);
+        task.Status = DownloadStatus.Completed;
+        task.ProgressPercent = 100;
+    }
+
+    private async Task DownloadFileAssetAsync(DownloadTask task, UdemyAsset asset, bool skipExisting, CancellationToken ct)
+    {
+        string? fileUrl = null;
+        string ext = Path.GetExtension(asset.Filename ?? ".file");
+
+        if (asset.DownloadUrls?.File is { Count: > 0 })
+            fileUrl = asset.DownloadUrls.File.First().FileUrl;
+
+        if (string.IsNullOrEmpty(fileUrl))
+        {
+            task.Status = DownloadStatus.Skipped;
+            task.ErrorMessage = "No download URL for file asset";
+            return;
+        }
+
+        var filePath = task.FileName + ext;
+        await DownloadFileWithProgressAsync(fileUrl, filePath, task, null, ct);
+    }
+
+    private async Task DownloadCaptionsAsync(DownloadTask task, List<UdemyCaption> captions, string captionLang, CancellationToken ct)
+    {
+        var caption = captions.FirstOrDefault(c =>
+            c.LocaleId.StartsWith(captionLang, StringComparison.OrdinalIgnoreCase))
+            ?? captions.FirstOrDefault();
+        if (caption == null) return;
+
+        try
+        {
+            var srtPath = task.FileName + $".{caption.LocaleId}.srt";
+            var dir = Path.GetDirectoryName(srtPath);
+            if (!string.IsNullOrEmpty(dir)) Directory.CreateDirectory(dir);
+            var content = await _http.GetStringAsync(caption.Url, ct);
+            await File.WriteAllTextAsync(srtPath, content, ct);
+        }
+        catch { }
+    }
+
+    private async Task DownloadFileWithProgressAsync(
+        string url, string filePath, DownloadTask task, DownloadJob? job, CancellationToken ct)
+    {
+        var dir = Path.GetDirectoryName(filePath);
+        if (!string.IsNullOrEmpty(dir)) Directory.CreateDirectory(dir);
+
+        using var response = await _http.GetAsync(url, HttpCompletionOption.ResponseHeadersRead, ct);
+        response.EnsureSuccessStatusCode();
+
+        var totalBytes = response.Content.Headers.ContentLength ?? 0;
+        task.TotalBytes = totalBytes;
+
+        await using var contentStream = await response.Content.ReadAsStreamAsync(ct);
+        await using var fileStream = new FileStream(filePath, FileMode.Create, FileAccess.Write, FileShare.None, 81920, true);
+
+        var buffer = new byte[81920];
+        long downloaded = 0;
+        int bytesRead;
+        var lastUpdate = DateTime.UtcNow;
+
+        while ((bytesRead = await contentStream.ReadAsync(buffer, ct)) > 0)
+        {
+            while (job is { IsPaused: true } && !ct.IsCancellationRequested)
+                await Task.Delay(300, ct);
+            ct.ThrowIfCancellationRequested();
+
+            await fileStream.WriteAsync(buffer.AsMemory(0, bytesRead), ct);
+            downloaded += bytesRead;
+            task.DownloadedBytes = downloaded;
+            if (totalBytes > 0) task.ProgressPercent = downloaded * 100.0 / totalBytes;
+
+            if ((DateTime.UtcNow - lastUpdate).TotalMilliseconds > 250)
+            {
+                lastUpdate = DateTime.UtcNow;
+                NotifyStateChanged();
+            }
+        }
+
+        task.ProgressPercent = 100;
+        task.DownloadedBytes = downloaded;
+        task.TotalBytes = downloaded;
+    }
+
+    private static int ParseResolution(string label)
+    {
+        var match = ResolutionRegex().Match(label);
+        return match.Success ? int.Parse(match.Groups[1].Value) : 0;
+    }
+
+    public static string SanitizeFileName(string name)
+    {
+        var invalid = Path.GetInvalidFileNameChars();
+        var sanitized = new string(name.Select(c => invalid.Contains(c) ? '_' : c).ToArray());
+        return sanitized.Trim().TrimEnd('.');
+    }
+
+    private void NotifyStateChanged() => OnStateChanged?.Invoke();
+
+    [GeneratedRegex(@"(\d+)")]
+    private static partial Regex ResolutionRegex();
+}

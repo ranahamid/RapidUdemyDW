@@ -1,0 +1,292 @@
+﻿@page "/"
+@using RapidUdemyDW.Models
+@using RapidUdemyDW.Services
+@inject UdemyApiService Api
+@inject DownloadManager DlManager
+@inject CourseCacheService Cache
+@inject NavigationManager Nav
+
+<div class="page-header">
+    <h2>📚 My Courses</h2>
+    @if (!string.IsNullOrEmpty(_userName))
+    {
+        <span class="badge bg-success">Logged in as @_userName</span>
+    }
+</div>
+
+<div class="direct-link-box mb-3">
+    <div class="input-group">
+        <span class="input-group-text">🔗</span>
+        <input type="text" class="form-control" placeholder="Paste Udemy course link or slug... e.g. https://www.udemy.com/course/my-course/"
+               @bind="_directUrl" @bind:event="oninput" @onkeydown="OnDirectUrlKeyDown" />
+        <button class="btn btn-primary" @onclick="GoToDirectUrl" disabled="@(_resolvingUrl || string.IsNullOrWhiteSpace(_directUrl))">
+            @if (_resolvingUrl)
+            {
+                <span class="spinner-border spinner-border-sm"></span>
+            }
+            else
+            {
+                <span>Go ➜</span>
+            }
+        </button>
+    </div>
+    @if (!string.IsNullOrEmpty(_directUrlError))
+    {
+        <small class="text-danger">@_directUrlError</small>
+    }
+</div>
+
+@if (_loading)
+{
+    <div class="loading-overlay">
+        <div class="spinner-border text-primary" role="status"></div>
+        <p class="mt-2">@_loadingMessage</p>
+        @if (_totalCourseCount > 0)
+        {
+            <div class="progress mt-2" style="width: 200px; height: 6px;">
+                <div class="progress-bar" style="width: @(_courses.Count * 100 / _totalCourseCount)%"></div>
+            </div>
+        }
+    </div>
+}
+else if (!string.IsNullOrEmpty(_error))
+{
+    <div class="alert alert-danger d-flex align-items-center">
+        <span class="me-2">⚠️</span>
+        <div>
+            <strong>Error:</strong> @_error
+            <br />
+            <button class="btn btn-sm btn-outline-danger mt-2" @onclick="LoadCourses">Retry</button>
+        </div>
+    </div>
+}
+else if (_courses.Count == 0)
+{
+    <div class="alert alert-info">
+        <p>No courses found. Make sure your access token is valid.</p>
+        <a href="settings" class="btn btn-primary btn-sm">Go to Settings</a>
+    </div>
+}
+else
+{
+    <div class="d-flex gap-2 mb-3 align-items-center">
+        <input type="text" class="form-control search-box" placeholder="🔍 Search courses..."
+               @bind="_searchText" @bind:event="oninput" />
+        <button class="btn btn-outline-secondary btn-sm flex-shrink-0" @onclick="RefreshCourses" disabled="@_refreshing">
+            @if (_refreshing)
+            {
+                <span class="spinner-border spinner-border-sm"></span>
+            }
+            else
+            {
+                <span>🔄</span>
+            }
+        </button>
+        <span class="text-muted flex-shrink-0" style="font-size: 0.8rem;">@_courses.Count courses</span>
+    </div>
+
+    <div class="course-grid">
+        @foreach (var course in FilteredCourses)
+        {
+            <div class="course-card" @onclick="() => SelectCourse(course)">
+                <div class="course-image">
+                    <img src="@(course.ImageMedium ?? course.ImageSmall)" alt="@course.Title" loading="lazy" />
+                    <div class="course-progress-bar">
+                        <div class="course-progress-fill" style="width: @course.CompletionRatio%"></div>
+                    </div>
+                </div>
+                <div class="course-info">
+                    <h5 class="course-title" title="@course.Title">@course.Title</h5>
+                    <p class="course-meta">
+                        <span>👨‍🏫 @course.InstructorNames</span>
+                    </p>
+                    <p class="course-meta">
+                        <span>📖 @course.NumPublishedLectures lectures</span>
+                        <span class="ms-2">✅ @($"{course.CompletionRatio:F0}")%</span>
+                    </p>
+                </div>
+                <div class="course-action">
+                    <button class="btn btn-sm btn-primary w-100">
+                        ⬇️ Download
+                    </button>
+                </div>
+            </div>
+        }
+    </div>
+}
+
+@code {
+    private List<UdemyCourse> _courses = [];
+    private bool _loading;
+    private bool _refreshing;
+    private string? _error;
+    private string? _userName;
+    private string _searchText = string.Empty;
+    private string _loadingMessage = "Loading your courses...";
+    private int _totalCourseCount;
+
+    // Direct URL paste
+    private string _directUrl = string.Empty;
+    private bool _resolvingUrl;
+    private string? _directUrlError;
+
+    private IEnumerable<UdemyCourse> FilteredCourses =>
+        string.IsNullOrWhiteSpace(_searchText)
+            ? _courses
+            : _courses.Where(c => c.Title.Contains(_searchText, StringComparison.OrdinalIgnoreCase));
+
+    protected override async Task OnInitializedAsync()
+    {
+        if (!Api.HasToken)
+        {
+            var prefs = await SettingsHelper.LoadAsync();
+            if (!string.IsNullOrWhiteSpace(prefs.AccessToken))
+            {
+                Api.SetAccessToken(prefs.AccessToken);
+                DlManager.SetAccessToken(prefs.AccessToken);
+            }
+            else
+            {
+                Nav.NavigateTo("settings");
+                return;
+            }
+        }
+
+        await LoadCourses();
+    }
+
+    private async Task LoadCourses()
+    {
+        _error = null;
+
+        // 1. Try loading from cache first (instant)
+        var cached = await Cache.LoadFromCacheAsync();
+        if (cached.Count > 0)
+        {
+            _courses = cached;
+            _loading = false;
+            StateHasChanged();
+
+            // Validate token in the background
+            var (valid, name) = await Api.ValidateTokenAsync();
+            if (valid) _userName = name;
+
+            // Refresh in background if cache is stale
+            if (Cache.IsCacheStale())
+                _ = RefreshCoursesInBackground();
+
+            return;
+        }
+
+        // 2. No cache — fetch from API with progress
+        _loading = true;
+        _loadingMessage = "Loading your courses...";
+        StateHasChanged();
+
+        try
+        {
+            var (valid, name) = await Api.ValidateTokenAsync();
+            if (!valid)
+            {
+                _error = "Invalid access token. Please update it in Settings.";
+                _loading = false;
+                StateHasChanged();
+                return;
+            }
+            _userName = name;
+
+            _courses = [];
+            await Api.GetMyCoursesAsync(_courses, async (loaded, total) =>
+            {
+                _totalCourseCount = total;
+                _loadingMessage = $"Loading courses... {loaded} / {total}";
+                await InvokeAsync(StateHasChanged);
+            });
+
+            // Save to cache
+            await Cache.SaveToCacheAsync(_courses);
+        }
+        catch (Exception ex)
+        {
+            _error = ex.Message;
+        }
+        finally
+        {
+            _loading = false;
+            StateHasChanged();
+        }
+    }
+
+    private void SelectCourse(UdemyCourse course)
+    {
+        Nav.NavigateTo($"course/{course.Id}");
+    }
+
+    private async Task OnDirectUrlKeyDown(Microsoft.AspNetCore.Components.Web.KeyboardEventArgs e)
+    {
+        if (e.Key == "Enter")
+            await GoToDirectUrl();
+    }
+
+    private async Task GoToDirectUrl()
+    {
+        if (string.IsNullOrWhiteSpace(_directUrl)) return;
+
+        _resolvingUrl = true;
+        _directUrlError = null;
+        StateHasChanged();
+
+        try
+        {
+            var course = await Api.GetCourseByUrlAsync(_directUrl);
+            if (course != null)
+            {
+                _directUrl = string.Empty;
+                Nav.NavigateTo($"course/{course.Id}");
+            }
+            else
+            {
+                _directUrlError = "Course not found. Check the URL and make sure you're enrolled.";
+            }
+        }
+        catch (Exception ex)
+        {
+            _directUrlError = $"Error: {ex.Message}";
+        }
+        finally
+        {
+            _resolvingUrl = false;
+            StateHasChanged();
+        }
+    }
+
+    private async Task RefreshCourses()
+    {
+        await RefreshCoursesInBackground();
+    }
+
+    private async Task RefreshCoursesInBackground()
+    {
+        if (_refreshing) return;
+        _refreshing = true;
+        await InvokeAsync(StateHasChanged);
+
+        try
+        {
+            var fresh = new List<UdemyCourse>();
+            await Api.GetMyCoursesAsync(fresh);
+
+            if (fresh.Count > 0)
+            {
+                _courses = fresh;
+                await Cache.SaveToCacheAsync(fresh);
+            }
+        }
+        catch { /* background refresh — don't show error */ }
+        finally
+        {
+            _refreshing = false;
+            await InvokeAsync(StateHasChanged);
+        }
+    }
+}

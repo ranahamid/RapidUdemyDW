@@ -1,0 +1,35 @@
+﻿@inherits LayoutComponentBase
+@using RapidUdemyDW.Services
+@inject DownloadManager DlManager
+@inject NavigationManager Nav
+@implements IDisposable
+
+<div class="page">
+    <div class="sidebar">
+        <NavMenu />
+    </div>
+
+    <main>
+        <div class="top-row px-4">
+            <span class="app-version">RapidUdemy Downloader v1.0</span>
+            @if (DlManager.ActiveJobCount > 0)
+            {
+                <a href="downloads" class="global-download-indicator">
+                    <span class="spinner-border spinner-border-sm me-1"></span>
+                    @DlManager.ActiveJobCount job(s) downloading
+                    — @DlManager.CompletedTasks/@DlManager.TotalTasks files
+                </a>
+            }
+        </div>
+
+        <article class="content px-4">
+            @Body
+        </article>
+    </main>
+</div>
+
+@code {
+    protected override void OnInitialized() => DlManager.OnStateChanged += Refresh;
+    private void Refresh() => InvokeAsync(StateHasChanged);
+    public void Dispose() => DlManager.OnStateChanged -= Refresh;
+}
