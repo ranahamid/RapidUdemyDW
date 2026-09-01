@@ -12,7 +12,8 @@ public partial class DownloadManager
 {
     private readonly UdemyApiService _api;
     private readonly HttpClient _http;
-    private readonly SemaphoreSlim _semaphore = new(3, 3);
+    private readonly SemaphoreSlim _semaphore = new(10, 10);
+    private long _lastNotifyTicks;
 
     // History tracking
     private DownloadHistoryService? _history;
@@ -97,7 +98,7 @@ public partial class DownloadManager
         }
 
         Jobs.Insert(0, job);
-        NotifyStateChanged();
+        NotifyStateChangedImmediate();
 
         // Fire and forget — runs in background
         _ = RunJobAsync(job);
@@ -127,7 +128,7 @@ public partial class DownloadManager
         finally
         {
             job.IsRunning = false;
-            NotifyStateChanged();
+            NotifyStateChangedImmediate();
         }
     }
 
@@ -148,7 +149,7 @@ public partial class DownloadManager
 
         // Re-run the job
         _ = RunJobAsync(job);
-        NotifyStateChanged();
+        NotifyStateChangedImmediate();
     }
 
     /// <summary>Retry all failed tasks across all jobs.</summary>
@@ -173,19 +174,19 @@ public partial class DownloadManager
         if (!job.IsRunning)
             _ = RunJobAsync(job);
 
-        NotifyStateChanged();
+        NotifyStateChangedImmediate();
     }
 
     public void PauseJob(DownloadJob job)
     {
         job.IsPaused = true;
-        NotifyStateChanged();
+        NotifyStateChangedImmediate();
     }
 
     public void ResumeJob(DownloadJob job)
     {
         job.IsPaused = false;
-        NotifyStateChanged();
+        NotifyStateChangedImmediate();
     }
 
     public void CancelJob(DownloadJob job)
@@ -195,14 +196,14 @@ public partial class DownloadManager
         job.IsRunning = false;
         foreach (var t in job.Tasks.Where(t => t.Status is DownloadStatus.Queued or DownloadStatus.Downloading))
             t.Status = DownloadStatus.Failed;
-        NotifyStateChanged();
+        NotifyStateChangedImmediate();
     }
 
     public void RemoveJob(DownloadJob job)
     {
         if (job.IsRunning) CancelJob(job);
         Jobs.Remove(job);
-        NotifyStateChanged();
+        NotifyStateChangedImmediate();
     }
 
     /// <summary>
@@ -283,9 +284,49 @@ public partial class DownloadManager
         if (job.Tasks.Count == 0) return null;
 
         Jobs.Insert(0, job);
-        NotifyStateChanged();
+        NotifyStateChangedImmediate();
         _ = RunJobAsync(job);
         return job;
+    }
+
+    /// <summary>
+    /// Auto-retry all history sessions that have failed files. Called on app startup.
+    /// Ensures the access token is loaded from settings before making API calls.
+    /// </summary>
+    public async Task AutoRetryFailedFromHistoryAsync()
+    {
+        if (_history == null) return;
+
+        // Ensure access token is set before retrying (may not be set if user navigated here directly)
+        if (_http.DefaultRequestHeaders.Authorization == null)
+        {
+            var settings = await SettingsHelper.LoadAsync();
+            if (!string.IsNullOrWhiteSpace(settings.AccessToken))
+            {
+                SetAccessToken(settings.AccessToken);
+                _api.SetAccessToken(settings.AccessToken);
+            }
+            else
+            {
+                return; // No token — can't retry
+            }
+        }
+
+        var sessions = await _history.GetSessionsAsync();
+        var activeCourseIds = Jobs.Select(j => j.CourseId).ToHashSet();
+
+        var failedSessions = sessions
+            .Where(s => s.FailedFiles > 0 && !activeCourseIds.Contains(s.CourseId))
+            .ToList();
+
+        foreach (var session in failedSessions)
+        {
+            try
+            {
+                await RetryFromHistoryAsync(session);
+            }
+            catch { /* non-critical — skip sessions that fail to retry */ }
+        }
     }
 
     // Legacy compat
@@ -297,44 +338,54 @@ public partial class DownloadManager
 
     private async Task DownloadLectureAsync(DownloadJob job, DownloadTask task, DownloadSession? session, CancellationToken ct)
     {
-        await _semaphore.WaitAsync(ct);
         try
         {
             while (job.IsPaused && !ct.IsCancellationRequested)
                 await Task.Delay(500, ct);
             ct.ThrowIfCancellationRequested();
 
+            // Fetch lecture metadata OUTSIDE the semaphore — this is an API call,
+            // not a download. Don't waste a download slot waiting for metadata.
             task.Status = DownloadStatus.Downloading;
-            NotifyStateChanged();
+            NotifyStateChangedImmediate();
 
             var lecture = await _api.GetLectureAsync(job.CourseId, task.LectureId);
             if (lecture?.Asset == null)
             {
                 task.Status = DownloadStatus.Skipped;
                 task.ErrorMessage = "No asset data available";
-                NotifyStateChanged();
+                NotifyStateChangedImmediate();
                 return;
             }
 
             var asset = lecture.Asset;
 
-            if (asset.AssetType == "Video")
-                await DownloadVideoAsync(job, task, asset, ct);
-            else if (asset.AssetType == "Article")
-                await SaveArticleAsync(task, asset);
-            else if (asset.AssetType is "File" or "E-Book")
-                await DownloadFileAssetAsync(task, asset, job.SkipExisting, ct);
-            else
+            // Now acquire a download slot for the actual file transfer
+            await _semaphore.WaitAsync(ct);
+            try
             {
-                task.Status = DownloadStatus.Skipped;
-                task.ErrorMessage = $"Unsupported asset type: {asset.AssetType}";
+                if (asset.AssetType == "Video")
+                    await DownloadVideoAsync(job, task, asset, ct);
+                else if (asset.AssetType == "Article")
+                    await SaveArticleAsync(task, asset);
+                else if (asset.AssetType is "File" or "E-Book")
+                    await DownloadFileAssetAsync(task, asset, job.SkipExisting, ct);
+                else
+                {
+                    task.Status = DownloadStatus.Skipped;
+                    task.ErrorMessage = $"Unsupported asset type: {asset.AssetType}";
+                }
+
+                if (job.DownloadCaptions && asset.Captions?.Count > 0)
+                    await DownloadCaptionsAsync(task, asset.Captions, job.CaptionLanguage, ct);
+
+                if (task.Status == DownloadStatus.Downloading)
+                    task.Status = DownloadStatus.Completed;
             }
-
-            if (job.DownloadCaptions && asset.Captions?.Count > 0)
-                await DownloadCaptionsAsync(task, asset.Captions, job.CaptionLanguage, ct);
-
-            if (task.Status == DownloadStatus.Downloading)
-                task.Status = DownloadStatus.Completed;
+            finally
+            {
+                _semaphore.Release();
+            }
         }
         catch (OperationCanceledException)
         {
@@ -348,15 +399,13 @@ public partial class DownloadManager
         }
         finally
         {
-            _semaphore.Release();
-
             if (_history != null && session != null &&
                 task.Status is DownloadStatus.Completed or DownloadStatus.Failed or DownloadStatus.Skipped)
             {
                 try { await _history.RecordFileAsync(session, task); } catch { }
             }
 
-            NotifyStateChanged();
+            NotifyStateChangedImmediate();
         }
     }
 
@@ -489,9 +538,9 @@ public partial class DownloadManager
         task.TotalBytes = totalBytes;
 
         await using var contentStream = await response.Content.ReadAsStreamAsync(ct);
-        await using var fileStream = new FileStream(filePath, FileMode.Create, FileAccess.Write, FileShare.None, 81920, true);
+        await using var fileStream = new FileStream(filePath, FileMode.Create, FileAccess.Write, FileShare.None, 1048576, true);
 
-        var buffer = new byte[81920];
+        var buffer = new byte[1048576]; // 1 MB buffer
         long downloaded = 0;
         int bytesRead;
         var lastUpdate = DateTime.UtcNow;
@@ -532,7 +581,22 @@ public partial class DownloadManager
         return sanitized.Trim().TrimEnd('.');
     }
 
-    private void NotifyStateChanged() => OnStateChanged?.Invoke();
+    private void NotifyStateChanged()
+    {
+        // Throttle UI notifications to max every 200ms to avoid re-render backpressure
+        var now = Environment.TickCount64;
+        var last = Interlocked.Read(ref _lastNotifyTicks);
+        if (now - last < 200) return;
+        Interlocked.Exchange(ref _lastNotifyTicks, now);
+        OnStateChanged?.Invoke();
+    }
+
+    /// <summary>Force a state notification regardless of throttle (for status changes like completed/failed).</summary>
+    private void NotifyStateChangedImmediate()
+    {
+        Interlocked.Exchange(ref _lastNotifyTicks, Environment.TickCount64);
+        OnStateChanged?.Invoke();
+    }
 
     [GeneratedRegex(@"(\d+)")]
     private static partial Regex ResolutionRegex();

@@ -30,7 +30,15 @@ namespace RapidUdemyDW
             {
                 var api = sp.GetRequiredService<UdemyApiService>();
                 var history = sp.GetRequiredService<DownloadHistoryService>();
-                var handler = new HttpClientHandler { UseCookies = false };
+                var handler = new SocketsHttpHandler
+                {
+                    MaxConnectionsPerServer = 24,
+                    PooledConnectionLifetime = TimeSpan.FromMinutes(10),
+                    PooledConnectionIdleTimeout = TimeSpan.FromMinutes(5),
+                    EnableMultipleHttp2Connections = true,
+                    UseCookies = false,
+                    AutomaticDecompression = System.Net.DecompressionMethods.All
+                };
                 var http = new HttpClient(handler) { Timeout = TimeSpan.FromHours(2) };
                 // Must use the same mobile UA to bypass Cloudflare for HLS m3u8 fetches
                 http.DefaultRequestHeaders.TryAddWithoutValidation("User-Agent", "UdemyAndroid 5.5.1/515009");

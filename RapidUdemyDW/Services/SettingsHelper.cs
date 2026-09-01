@@ -34,7 +34,8 @@ public static class SettingsHelper
 
     private static AppSettings CreateDefault() => new()
     {
-        DownloadPath = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), "Downloads", "UdemyCourses"),
+        //DownloadPath = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), "Downloads", "UdemyCourses"),
+        DownloadPath = "D:\\Udeler",
         PreferredQuality = "1080",
         DownloadCaptions = true,
         CaptionLanguage = "en",

@@ -4,11 +4,20 @@
 @inject DownloadManager DlManager
 @inject DownloadHistoryService History
 @inject NavigationManager Nav
+@inject IJSRuntime JS
 @implements IDisposable
 
 <div class="page-header">
     <h2>📥 Downloads</h2>
 </div>
+
+@if (_autoRetrying)
+{
+    <div class="alert alert-info d-flex align-items-center gap-2 mb-3">
+        <span class="spinner-border spinner-border-sm"></span>
+        <span>Auto-retrying @_autoRetryCount failed course(s) from history…</span>
+    </div>
+}
 
 <!-- Tabs -->
 <ul class="nav nav-tabs mb-3">
@@ -57,15 +66,19 @@
         @foreach (var job in DlManager.Jobs)
         {
             <div class="download-job-card @(job.IsRunning ? "job-active" : job.IsComplete ? "job-complete" : "")">
-                <div class="job-header">
+                <div class="job-header" style="cursor: pointer;" @onclick="() => ToggleJobAndScroll(job)">
                     <div>
                         <strong>📚 @job.CourseName</strong>
                         <div class="text-muted" style="font-size: 0.8rem;">
                             Started @job.StartedAt.ToLocalTime().ToString("h:mm tt")
                             &nbsp;·&nbsp; @job.CompletedTasks / @job.TotalTasks files
+                            @if (job.IsRunning)
+                            {
+                                <span class="text-primary">&nbsp;·&nbsp; ⚡ @job.Tasks.Count(t => t.Status == DownloadStatus.Downloading) active</span>
+                            }
                         </div>
                     </div>
-                    <div class="d-flex align-items-center gap-1">
+                    <div class="d-flex align-items-center gap-1" @onclick:stopPropagation="true">
                         @if (job.IsRunning)
                         {
                             @if (job.IsPaused)
@@ -86,9 +99,9 @@
                             }
                             <button class="btn btn-outline-danger btn-sm" @onclick="() => DlManager.RemoveJob(job)">🗑️</button>
                         }
-                        <button class="btn btn-outline-secondary btn-sm" @onclick="() => ToggleJobExpand(job.Id)">
+                        <span class="expand-icon">
                             @(IsJobExpanded(job.Id) ? "▼" : "▶")
-                        </button>
+                        </span>
                     </div>
                 </div>
 
@@ -112,10 +125,11 @@
 
                 @if (IsJobExpanded(job.Id))
                 {
-                    <div class="job-tasks-list">
+                    <div class="job-tasks-list" id="tasks-@job.Id">
                         @foreach (var task in job.Tasks)
                         {
-                            <div class="download-task-item @GetTaskCssClass(task)">
+                            var taskElementId = $"task-{job.Id}-{task.LectureId}";
+                            <div class="download-task-item @GetTaskCssClass(task)" id="@taskElementId">
                                 <div class="d-flex justify-content-between align-items-center">
                                     <div class="task-info">
                                         <span class="task-status-icon">@GetStatusIcon(task.Status)</span>
@@ -240,6 +254,9 @@ else
     private List<DownloadSession> _sessions = [];
     private HashSet<string> _expandedSessions = [];
     private HashSet<string> _expandedJobs = [];
+    private bool _autoRetrying;
+    private int _autoRetryCount;
+    private string? _scrollToElementId;
 
     protected override async Task OnInitializedAsync()
     {
@@ -249,6 +266,47 @@ else
         // Auto-expand running jobs
         foreach (var job in DlManager.Jobs.Where(j => j.IsRunning))
             _expandedJobs.Add(job.Id);
+
+        // Auto-retry all failed course downloads from history on initial load
+        var failedSessions = _sessions.Where(s => s.FailedFiles > 0).ToList();
+        if (failedSessions.Count > 0)
+        {
+            _autoRetrying = true;
+            _autoRetryCount = failedSessions.Count;
+            StateHasChanged();
+
+            _ = Task.Run(async () =>
+            {
+                try
+                {
+                    await DlManager.AutoRetryFailedFromHistoryAsync();
+                }
+                catch { /* non-critical */ }
+                finally
+                {
+                    await InvokeAsync(async () =>
+                    {
+                        _autoRetrying = false;
+                        if (DlManager.Jobs.Count > 0)
+                            _activeTab = "active";
+                        foreach (var job in DlManager.Jobs.Where(j => j.IsRunning))
+                            _expandedJobs.Add(job.Id);
+                        await LoadHistory(); // Refresh history to remove retried sessions
+                        StateHasChanged();
+                    });
+                }
+            });
+        }
+    }
+
+    protected override async Task OnAfterRenderAsync(bool firstRender)
+    {
+        if (_scrollToElementId != null)
+        {
+            var id = _scrollToElementId;
+            _scrollToElementId = null;
+            await ScrollToElement(id);
+        }
     }
 
     private async Task LoadHistory()
@@ -308,6 +366,31 @@ else
     private void ToggleJobExpand(string id)
     {
         if (!_expandedJobs.Remove(id)) _expandedJobs.Add(id);
+    }
+
+    private void ToggleJobAndScroll(DownloadJob job)
+    {
+        var wasExpanded = _expandedJobs.Contains(job.Id);
+        ToggleJobExpand(job.Id);
+
+        // If we just expanded, schedule a scroll to the first active/queued task after render
+        if (!wasExpanded)
+        {
+            // Prefer the first currently-downloading task, then first queued
+            var targetTask = job.Tasks.FirstOrDefault(t => t.Status == DownloadStatus.Downloading)
+                          ?? job.Tasks.FirstOrDefault(t => t.Status == DownloadStatus.Queued);
+            if (targetTask != null)
+                _scrollToElementId = $"task-{job.Id}-{targetTask.LectureId}";
+        }
+    }
+
+    private async Task ScrollToElement(string elementId)
+    {
+        try
+        {
+            await JS.InvokeVoidAsync("scrollToElementById", elementId);
+        }
+        catch { /* non-critical */ }
     }
 
     private bool IsJobExpanded(string id) => _expandedJobs.Contains(id);

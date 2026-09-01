@@ -44,31 +44,61 @@ public static partial class HlsDownloader
             return;
         }
 
-        // 3. Download all segments and concatenate into output file
+        // 3. Download segments in parallel batches, write each batch to disk to limit memory
         var dir = Path.GetDirectoryName(outputFilePath);
         if (!string.IsNullOrEmpty(dir))
             Directory.CreateDirectory(dir);
 
         task.TotalBytes = segmentUrls.Count; // Use segment count as total for progress
 
-        await using var outStream = new FileStream(
-            outputFilePath, FileMode.Create, FileAccess.Write, FileShare.None, 81920, true);
-
+        const int batchSize = 20; // Download 20 segments at a time in parallel
         long totalDownloaded = 0;
-        for (int i = 0; i < segmentUrls.Count; i++)
+        int completedSegments = 0;
+
+        await using var outStream = new FileStream(
+            outputFilePath, FileMode.Create, FileAccess.Write, FileShare.None, 262144, true);
+
+        for (int batchStart = 0; batchStart < segmentUrls.Count; batchStart += batchSize)
         {
             // Pause support
             while (isPausedFunc() && !ct.IsCancellationRequested)
                 await Task.Delay(300, ct);
             ct.ThrowIfCancellationRequested();
 
-            var segData = await http.GetByteArrayAsync(segmentUrls[i], ct);
-            await outStream.WriteAsync(segData, ct);
+            var batchEnd = Math.Min(batchStart + batchSize, segmentUrls.Count);
+            var batchCount = batchEnd - batchStart;
+            var batchData = new byte[batchCount][];
 
-            totalDownloaded += segData.Length;
-            task.DownloadedBytes = totalDownloaded;
-            task.TotalBytes = (long)(totalDownloaded / ((double)(i + 1) / segmentUrls.Count));
-            task.ProgressPercent = (i + 1) * 100.0 / segmentUrls.Count;
+            // Download this batch in parallel
+            var batchTasks = new Task[batchCount];
+            for (int i = 0; i < batchCount; i++)
+            {
+                var idx = i;
+                var url = segmentUrls[batchStart + i];
+                batchTasks[i] = Task.Run(async () =>
+                {
+                    batchData[idx] = await http.GetByteArrayAsync(url, ct);
+                }, ct);
+            }
+
+            await Task.WhenAll(batchTasks);
+
+            // Write this batch in order to disk immediately (frees memory)
+            for (int i = 0; i < batchCount; i++)
+            {
+                if (batchData[i] != null)
+                {
+                    await outStream.WriteAsync(batchData[i], ct);
+                    totalDownloaded += batchData[i].Length;
+                    batchData[i] = null!; // Release memory immediately
+                }
+
+                completedSegments++;
+                task.DownloadedBytes = totalDownloaded;
+                task.TotalBytes = (long)(totalDownloaded / ((double)completedSegments / segmentUrls.Count));
+                task.ProgressPercent = completedSegments * 100.0 / segmentUrls.Count;
+            }
+
             onProgress?.Invoke();
         }
 
