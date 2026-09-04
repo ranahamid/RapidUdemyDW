@@ -15,7 +15,16 @@
 {
     <div class="alert alert-info d-flex align-items-center gap-2 mb-3">
         <span class="spinner-border spinner-border-sm"></span>
-        <span>Auto-retrying @_autoRetryCount failed course(s) from history…</span>
+        <span>Retrying @_autoRetryCount failed course(s) from history…</span>
+    </div>
+}
+else if (_autoRetryCount > 0 && !DlManager.IsRunning)
+{
+    <div class="alert alert-warning d-flex align-items-center justify-content-between mb-3">
+        <span>⚠️ @_autoRetryCount course(s) have failed downloads.</span>
+        <button class="btn btn-sm btn-warning" @onclick="RetryAllFailed">
+            🔄 Retry All Failed
+        </button>
     </div>
 }
 
@@ -267,36 +276,10 @@ else
         foreach (var job in DlManager.Jobs.Where(j => j.IsRunning))
             _expandedJobs.Add(job.Id);
 
-        // Auto-retry all failed course downloads from history on initial load
+        // Show failed session count but DON'T auto-retry on every page visit.
+        // Users can manually retry individual sessions or use the "Retry All" button.
         var failedSessions = _sessions.Where(s => s.FailedFiles > 0).ToList();
-        if (failedSessions.Count > 0)
-        {
-            _autoRetrying = true;
-            _autoRetryCount = failedSessions.Count;
-            StateHasChanged();
-
-            _ = Task.Run(async () =>
-            {
-                try
-                {
-                    await DlManager.AutoRetryFailedFromHistoryAsync();
-                }
-                catch { /* non-critical */ }
-                finally
-                {
-                    await InvokeAsync(async () =>
-                    {
-                        _autoRetrying = false;
-                        if (DlManager.Jobs.Count > 0)
-                            _activeTab = "active";
-                        foreach (var job in DlManager.Jobs.Where(j => j.IsRunning))
-                            _expandedJobs.Add(job.Id);
-                        await LoadHistory(); // Refresh history to remove retried sessions
-                        StateHasChanged();
-                    });
-                }
-            });
-        }
+        _autoRetryCount = failedSessions.Count;
     }
 
     protected override async Task OnAfterRenderAsync(bool firstRender)
@@ -327,6 +310,28 @@ else
 
     private bool _retrying;
     private string? _retryMessage;
+
+    private async Task RetryAllFailed()
+    {
+        _autoRetrying = true;
+        StateHasChanged();
+
+        try
+        {
+            await DlManager.AutoRetryFailedFromHistoryAsync();
+        }
+        catch { /* non-critical */ }
+        finally
+        {
+            _autoRetrying = false;
+            if (DlManager.Jobs.Count > 0)
+                _activeTab = "active";
+            foreach (var job in DlManager.Jobs.Where(j => j.IsRunning))
+                _expandedJobs.Add(job.Id);
+            await LoadHistory();
+            StateHasChanged();
+        }
+    }
 
     private async Task RetrySession(DownloadSession session)
     {

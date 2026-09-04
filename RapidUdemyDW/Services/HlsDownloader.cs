@@ -72,9 +72,8 @@ public static partial class HlsDownloader
             var batchCount = batchEnd - batchStart;
             var batchData = new byte[batchCount][];
 
-            // Download this batch in parallel using ResponseHeadersRead to
-            // let the runtime parse headers one at a time instead of buffering
-            // entire responses, which reduces pressure on ParseHeadersCore.
+            // Download this batch in parallel with per-segment retry logic.
+            // Uses ResponseHeadersRead to reduce pressure on ParseHeadersCore.
             var batchTasks = new Task[batchCount];
             for (int i = 0; i < batchCount; i++)
             {
@@ -82,9 +81,8 @@ public static partial class HlsDownloader
                 var url = segmentUrls[batchStart + i];
                 batchTasks[i] = Task.Run(async () =>
                 {
-                    using var resp = await http.GetAsync(url, HttpCompletionOption.ResponseHeadersRead, ct);
-                    resp.EnsureSuccessStatusCode();
-                    batchData[idx] = await resp.Content.ReadAsByteArrayAsync(ct);
+                    batchData[idx] = await DownloadSegmentWithRetryAsync(
+                        http, url, AppConstants.HlsSegmentMaxRetries, ct);
                 }, ct);
             }
 
@@ -209,6 +207,30 @@ public static partial class HlsDownloader
 
         var baseUri = new Uri(baseUrl);
         return new Uri(baseUri, url).ToString();
+    }
+
+    /// <summary>
+    /// Download a single HLS segment with exponential-backoff retry.
+    /// </summary>
+    private static async Task<byte[]> DownloadSegmentWithRetryAsync(
+        HttpClient http, string url, int maxRetries, CancellationToken ct)
+    {
+        for (int attempt = 0; ; attempt++)
+        {
+            try
+            {
+                using var resp = await http.GetAsync(url, HttpCompletionOption.ResponseHeadersRead, ct);
+                resp.EnsureSuccessStatusCode();
+                return await resp.Content.ReadAsByteArrayAsync(ct);
+            }
+            catch (OperationCanceledException) { throw; } // Don't retry cancellations
+            catch when (attempt < maxRetries)
+            {
+                // Exponential backoff: 500ms, 1s, 2s
+                var delay = TimeSpan.FromMilliseconds(500 * Math.Pow(2, attempt));
+                await Task.Delay(delay, ct);
+            }
+        }
     }
 
     [GeneratedRegex(@"RESOLUTION=(\d+)x(\d+)")]

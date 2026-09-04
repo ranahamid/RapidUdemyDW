@@ -625,3 +625,69 @@ h1:focus {
     display: flex;
     justify-content: flex-end;
 }
+
+/* ── EULA Dialog ───────────────────────────────────────────────── */
+.eula-overlay {
+    position: fixed;
+    inset: 0;
+    background: rgba(0, 0, 0, 0.6);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 9999;
+    backdrop-filter: blur(4px);
+}
+
+.eula-dialog {
+    background: #fff;
+    border-radius: 12px;
+    padding: 2rem;
+    max-width: 560px;
+    width: 90%;
+    max-height: 80vh;
+    display: flex;
+    flex-direction: column;
+    box-shadow: 0 20px 60px rgba(0, 0, 0, 0.3);
+}
+
+.eula-content {
+    flex: 1;
+    overflow-y: auto;
+    margin: 1rem 0;
+    padding: 1rem;
+    background: #f8f9fa;
+    border-radius: 8px;
+    font-size: 0.9rem;
+    line-height: 1.6;
+    max-height: 40vh;
+}
+
+.eula-content h6 {
+    margin-bottom: 0.75rem;
+    color: #333;
+}
+
+.eula-content ol {
+    padding-left: 1.2rem;
+}
+
+.eula-content li {
+    margin-bottom: 0.75rem;
+}
+
+/* ── Developer Card ────────────────────────────────────────────── */
+.developer-card {
+    background: linear-gradient(135deg, #f8f9fa 0%, #e9ecef 100%);
+    border-radius: 10px;
+    padding: 1.25rem;
+    border-left: 4px solid #a435f0;
+}
+
+.developer-info h5 {
+    color: #333;
+    font-weight: 600;
+}
+
+.developer-info .badge {
+    border: 1px solid #dee2e6;
+}

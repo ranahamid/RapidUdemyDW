@@ -1,5 +1,6 @@
 ﻿using Android.App;
 using Android.Runtime;
+using Serilog;
 
 namespace RapidUdemyDW
 {
@@ -19,8 +20,7 @@ namespace RapidUdemyDW
             // so the app doesn't force-close.
             AndroidEnvironment.UnhandledExceptionRaiser += (s, e) =>
             {
-                System.Diagnostics.Debug.WriteLine(
-                    $"[AndroidEnvironment.UnhandledException] {e.Exception}");
+                Log.Error(e.Exception, "AndroidEnvironment.UnhandledException");
                 e.Handled = true; // Swallow — keep the app alive
             };
         }

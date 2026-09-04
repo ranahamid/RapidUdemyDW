@@ -192,6 +192,15 @@
     {
         try
         {
+            // Validate download path before saving
+            var (pathValid, pathError) = SettingsHelper.ValidateDownloadPath(_settings.DownloadPath);
+            if (!pathValid)
+            {
+                _message = $"⚠️ Download path: {pathError}";
+                _isError = true;
+                return;
+            }
+
             await SettingsHelper.SaveAsync(_settings);
 
             if (!string.IsNullOrWhiteSpace(_settings.AccessToken))
@@ -201,6 +210,9 @@
                 // Clear course cache so it reloads with new token
                 Cache.ClearCache();
             }
+
+            // Apply MaxConcurrentDownloads to the download manager
+            DlManager.SetMaxConcurrentDownloads(_settings.MaxConcurrentDownloads);
 
             _message = "Settings saved successfully!";
             _isError = false;

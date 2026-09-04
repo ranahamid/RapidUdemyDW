@@ -292,13 +292,27 @@ public enum DownloadStatus
 
 public class AppSettings
 {
+    /// <summary>Access token — stored in SecureStorage, NOT serialized to JSON.</summary>
+    [System.Text.Json.Serialization.JsonIgnore]
     public string AccessToken { get; set; } = string.Empty;
+
+    /// <summary>Legacy: token from old JSON files. Used for one-time migration to SecureStorage.</summary>
+    [JsonPropertyName("AccessToken")]
+    public string? _legacyToken { get; set; }
+
     public string DownloadPath { get; set; } = string.Empty;
     public string PreferredQuality { get; set; } = "1080";
     public bool DownloadCaptions { get; set; } = true;
     public string CaptionLanguage { get; set; } = "en";
     public int MaxConcurrentDownloads { get; set; } = 3;
     public bool SkipExistingFiles { get; set; } = true;
+
+    /// <summary>Version of EULA the user has accepted. Null = not accepted.</summary>
+    public string? EulaAcceptedVersion { get; set; }
+
+    /// <summary>Whether the user has accepted the current EULA version.</summary>
+    [System.Text.Json.Serialization.JsonIgnore]
+    public bool HasAcceptedEula => EulaAcceptedVersion == AppConstants.EulaVersion;
 }
 
 // ── Download History ──────────────────────────────────────────────

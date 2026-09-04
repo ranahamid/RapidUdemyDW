@@ -1,0 +1,74 @@
+@using RapidUdemyDW.Models
+@using RapidUdemyDW.Services
+
+@if (_showDialog)
+{
+    <div class="eula-overlay">
+        <div class="eula-dialog">
+            <h4>⚡ Welcome to @AppConstants.AppName</h4>
+            <p class="text-muted">Please review and accept the terms before continuing.</p>
+
+            <div class="eula-content">
+                <h6>Terms of Use</h6>
+                <ol>
+                    <li><strong>Personal Use Only.</strong> This application is intended for personal,
+                        non-commercial use. You may download course content that you have legitimately
+                        purchased or have access to through an active subscription.</li>
+
+                    <li><strong>Copyright Compliance.</strong> Downloaded content remains subject to the
+                        original content provider's licensing terms. You may not redistribute, share,
+                        or sell downloaded materials.</li>
+
+                    <li><strong>Your Responsibility.</strong> You are solely responsible for ensuring
+                        your use of this application complies with all applicable terms of service,
+                        copyright laws, and regulations in your jurisdiction.</li>
+
+                    <li><strong>No Warranty.</strong> This application is provided "as-is" without any
+                        warranty. The developers are not liable for any damages arising from its use.</li>
+
+                    <li><strong>Data Storage.</strong> Your access token is stored securely using your
+                        device's built-in credential manager. Download history and settings are stored
+                        locally on your device.</li>
+
+                    <li><strong>No Telemetry.</strong> This application does not collect, transmit, or
+                        share any personal data or usage analytics.</li>
+                </ol>
+            </div>
+
+            <div class="d-flex gap-2 mt-3">
+                <button class="btn btn-primary flex-grow-1" @onclick="AcceptEula">
+                    ✅ I Accept
+                </button>
+                <button class="btn btn-outline-secondary" @onclick="DeclineEula">
+                    Decline & Exit
+                </button>
+            </div>
+        </div>
+    </div>
+}
+
+@code {
+    [Parameter] public EventCallback OnAccepted { get; set; }
+
+    private bool _showDialog;
+
+    protected override async Task OnInitializedAsync()
+    {
+        var settings = await SettingsHelper.LoadAsync();
+        _showDialog = !settings.HasAcceptedEula;
+    }
+
+    private async Task AcceptEula()
+    {
+        var settings = await SettingsHelper.LoadAsync();
+        settings.EulaAcceptedVersion = AppConstants.EulaVersion;
+        await SettingsHelper.SaveAsync(settings);
+        _showDialog = false;
+        await OnAccepted.InvokeAsync();
+    }
+
+    private void DeclineEula()
+    {
+        Application.Current?.Quit();
+    }
+}

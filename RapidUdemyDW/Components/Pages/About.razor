@@ -1,0 +1,150 @@
+@page "/about"
+@using RapidUdemyDW.Services
+
+<div class="page-header">
+    <h2>ℹ️ About</h2>
+</div>
+
+<div class="settings-card">
+    <div class="text-center mb-4">
+        <h3>⚡ @AppConstants.AppName</h3>
+        <p class="text-muted">Version @AppConstants.Version</p>
+    </div>
+
+    <div class="mb-3">
+        <h6>📋 Application Info</h6>
+        <table class="table table-sm">
+            <tr><td class="text-muted">Version</td><td>@AppConstants.Version</td></tr>
+            <tr><td class="text-muted">Platform</td><td>@DeviceInfo.Platform (@DeviceInfo.Idiom)</td></tr>
+            <tr><td class="text-muted">OS Version</td><td>@DeviceInfo.VersionString</td></tr>
+            <tr><td class="text-muted">Device</td><td>@DeviceInfo.Manufacturer @DeviceInfo.Model</td></tr>
+            <tr><td class="text-muted">.NET Runtime</td><td>@System.Runtime.InteropServices.RuntimeInformation.FrameworkDescription</td></tr>
+            <tr><td class="text-muted">Data Directory</td><td style="word-break: break-all; font-size: 0.85rem;">@FileSystem.AppDataDirectory</td></tr>
+            <tr><td class="text-muted">Log Directory</td><td style="word-break: break-all; font-size: 0.85rem;">@AppConstants.LogDirectory</td></tr>
+        </table>
+    </div>
+
+    <div class="mb-3">
+        <h6>📊 Storage</h6>
+        <table class="table table-sm">
+            <tr><td class="text-muted">Settings file</td><td>@_settingsSize</td></tr>
+            <tr><td class="text-muted">Cache</td><td>@_cacheSize</td></tr>
+            <tr><td class="text-muted">Download history</td><td>@_historySize</td></tr>
+            <tr><td class="text-muted">Logs</td><td>@_logSize</td></tr>
+        </table>
+    </div>
+
+    <div class="mb-3">
+        <h6>👨‍💻 Developer</h6>
+        <div class="developer-card">
+            <div class="developer-info">
+                <h5 class="mb-1">@AppConstants.DeveloperName</h5>
+                <p class="text-muted mb-1" style="font-size: 0.9rem;">@AppConstants.DeveloperTitle</p>
+                <p class="text-muted mb-2" style="font-size: 0.85rem;">
+                    📍 @AppConstants.DeveloperLocation
+                    · 🏢 @AppConstants.DeveloperCompany
+                </p>
+                <p class="text-muted mb-2" style="font-size: 0.85rem;">
+                    🎓 @AppConstants.DeveloperEducation
+                </p>
+                <div class="mb-2">
+                    @foreach (var award in AppConstants.DeveloperAwards)
+                    {
+                        <span class="badge bg-light text-dark me-1 mb-1" style="font-size: 0.8rem;">@award</span>
+                    }
+                </div>
+                <div class="d-flex gap-2 flex-wrap">
+                    <a href="@AppConstants.DeveloperLinkedIn" target="_blank" rel="noopener"
+                       class="btn btn-outline-primary btn-sm">
+                        🔗 LinkedIn
+                    </a>
+                    <a href="@AppConstants.DeveloperLeetCode" target="_blank" rel="noopener"
+                       class="btn btn-outline-warning btn-sm">
+                        💻 LeetCode
+                    </a>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <div class="mb-3">
+        <h6>⚖️ Legal</h6>
+        <p class="small text-muted">
+            This application is provided as-is for personal use. You are responsible for
+            ensuring your use complies with all applicable terms of service and copyright laws.
+            Downloaded content remains subject to the original content provider's licensing terms.
+        </p>
+        <p class="small text-muted mb-0">
+            © @DateTime.Now.Year @AppConstants.DeveloperName. All rights reserved.
+        </p>
+    </div>
+</div>
+
+<div class="mt-3 d-flex gap-2">
+    <button class="btn btn-outline-danger btn-sm" @onclick="ClearLogs">
+        🗑️ Clear Logs
+    </button>
+</div>
+
+@code {
+    private string _settingsSize = "—";
+    private string _cacheSize = "—";
+    private string _historySize = "—";
+    private string _logSize = "—";
+
+    protected override void OnInitialized()
+    {
+        _settingsSize = GetFileSize(Path.Combine(FileSystem.AppDataDirectory, "udemy_dl_settings.json"));
+        _cacheSize = GetDirectorySize(Path.Combine(FileSystem.AppDataDirectory, "cache"));
+        _historySize = GetFileSize(Path.Combine(FileSystem.AppDataDirectory, "download_history.json"));
+        _logSize = GetDirectorySize(AppConstants.LogDirectory);
+    }
+
+    private static string GetFileSize(string path)
+    {
+        try
+        {
+            if (!File.Exists(path)) return "Not found";
+            var info = new FileInfo(path);
+            return FormatBytes(info.Length);
+        }
+        catch { return "Error"; }
+    }
+
+    private static string GetDirectorySize(string path)
+    {
+        try
+        {
+            if (!Directory.Exists(path)) return "Empty";
+            var size = new DirectoryInfo(path)
+                .EnumerateFiles("*", SearchOption.AllDirectories)
+                .Sum(f => f.Length);
+            return FormatBytes(size);
+        }
+        catch { return "Error"; }
+    }
+
+    private static string FormatBytes(long bytes) => bytes switch
+    {
+        < 1024 => $"{bytes} B",
+        < 1048576 => $"{bytes / 1024.0:F1} KB",
+        < 1073741824 => $"{bytes / 1048576.0:F1} MB",
+        _ => $"{bytes / 1073741824.0:F2} GB"
+    };
+
+    private void ClearLogs()
+    {
+        try
+        {
+            if (Directory.Exists(AppConstants.LogDirectory))
+            {
+                foreach (var file in Directory.GetFiles(AppConstants.LogDirectory, "*.log"))
+                {
+                    try { File.Delete(file); } catch { }
+                }
+            }
+            _logSize = GetDirectorySize(AppConstants.LogDirectory);
+        }
+        catch { }
+    }
+}

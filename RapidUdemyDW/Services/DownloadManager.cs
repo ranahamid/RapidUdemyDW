@@ -12,7 +12,8 @@ public partial class DownloadManager
 {
     private readonly UdemyApiService _api;
     private readonly HttpClient _http;
-    private readonly SemaphoreSlim _semaphore = new(10, 10);
+    private SemaphoreSlim _semaphore = new(AppConstants.DefaultConcurrentDownloads, AppConstants.MaxConcurrentDownloadsCap);
+    private int _currentMaxDownloads = AppConstants.DefaultConcurrentDownloads;
     private long _lastNotifyTicks;
 
     // History tracking
@@ -39,6 +40,18 @@ public partial class DownloadManager
         _api = api;
         _http = httpClient;
         _http.Timeout = TimeSpan.FromHours(2);
+    }
+
+    /// <summary>
+    /// Update the max concurrent downloads limit from user settings.
+    /// Replaces the semaphore so new downloads use the new limit.
+    /// </summary>
+    public void SetMaxConcurrentDownloads(int max)
+    {
+        max = Math.Clamp(max, 1, AppConstants.MaxConcurrentDownloadsCap);
+        if (max == _currentMaxDownloads) return;
+        _currentMaxDownloads = max;
+        _semaphore = new SemaphoreSlim(max, AppConstants.MaxConcurrentDownloadsCap);
     }
 
     public void SetHistoryService(DownloadHistoryService history) => _history = history;

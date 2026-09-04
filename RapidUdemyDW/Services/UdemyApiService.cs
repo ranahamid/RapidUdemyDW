@@ -7,7 +7,7 @@ namespace RapidUdemyDW.Services;
 
 public class UdemyApiService
 {
-    private const string BaseUrl = "https://www.udemy.com/api-2.0";
+    private static string BaseUrl => AppConstants.UdemyBaseUrl;
     private readonly HttpClient _http;
     private string _accessToken = string.Empty;
 
@@ -16,7 +16,7 @@ public class UdemyApiService
         _http = httpClient;
         // Use the Udemy mobile app User-Agent to bypass Cloudflare bot protection.
         // A browser-style UA triggers Cloudflare challenges (403).
-        _http.DefaultRequestHeaders.TryAddWithoutValidation("User-Agent", "UdemyAndroid 5.5.1/515009");
+        _http.DefaultRequestHeaders.TryAddWithoutValidation("User-Agent", AppConstants.MobileUserAgent);
         _http.DefaultRequestHeaders.Add("Accept", "application/json, text/plain, */*");
     }
 

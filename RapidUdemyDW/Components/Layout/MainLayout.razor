@@ -4,6 +4,8 @@
 @inject NavigationManager Nav
 @implements IDisposable
 
+<EulaDialog />
+
 <div class="page">
     <div class="sidebar">
         <NavMenu />
@@ -11,7 +13,7 @@
 
     <main>
         <div class="top-row px-4">
-            <span class="app-version">RapidUdemy Downloader v1.0</span>
+            <span class="app-version">@AppConstants.FullVersion</span>
             @if (DlManager.ActiveJobCount > 0)
             {
                 <a href="downloads" class="global-download-indicator">
