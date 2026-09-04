@@ -51,7 +51,10 @@ public static partial class HlsDownloader
 
         task.TotalBytes = segmentUrls.Count; // Use segment count as total for progress
 
-        const int batchSize = 20; // Download 20 segments at a time in parallel
+        // Limit parallel segment downloads to avoid overwhelming the HTTP
+        // header parser — too many concurrent responses from the same CDN can
+        // trigger ExecutionEngineException in ParseHeadersCore.
+        const int batchSize = 8;
         long totalDownloaded = 0;
         int completedSegments = 0;
 
@@ -69,7 +72,9 @@ public static partial class HlsDownloader
             var batchCount = batchEnd - batchStart;
             var batchData = new byte[batchCount][];
 
-            // Download this batch in parallel
+            // Download this batch in parallel using ResponseHeadersRead to
+            // let the runtime parse headers one at a time instead of buffering
+            // entire responses, which reduces pressure on ParseHeadersCore.
             var batchTasks = new Task[batchCount];
             for (int i = 0; i < batchCount; i++)
             {
@@ -77,7 +82,9 @@ public static partial class HlsDownloader
                 var url = segmentUrls[batchStart + i];
                 batchTasks[i] = Task.Run(async () =>
                 {
-                    batchData[idx] = await http.GetByteArrayAsync(url, ct);
+                    using var resp = await http.GetAsync(url, HttpCompletionOption.ResponseHeadersRead, ct);
+                    resp.EnsureSuccessStatusCode();
+                    batchData[idx] = await resp.Content.ReadAsByteArrayAsync(ct);
                 }, ct);
             }
 
