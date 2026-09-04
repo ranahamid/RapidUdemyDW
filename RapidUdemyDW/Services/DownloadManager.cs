@@ -598,6 +598,126 @@ public partial class DownloadManager
         OnStateChanged?.Invoke();
     }
 
+    /// <summary>
+    /// One-click course download: fetches curriculum, skips already-downloaded files, and starts downloading everything.
+    /// Returns the job, or null if all files are already downloaded.
+    /// Throws on API/network errors so the caller can display them.
+    /// </summary>
+    public async Task<DownloadJob?> StartCourseDownloadAsync(long courseId)
+    {
+        var settings = await SettingsHelper.LoadAsync();
+        var downloadPath = string.IsNullOrWhiteSpace(settings.DownloadPath)
+            ? Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), "Downloads", "UdemyCourses")
+            : settings.DownloadPath;
+
+        // Fetch course name
+        string courseName = $"Course_{courseId}";
+        try
+        {
+            var courseInfo = await _api.GetCourseInfoAsync(courseId);
+            if (courseInfo != null) courseName = courseInfo.Title;
+        }
+        catch { /* fall back to generic name */ }
+
+        var safeCourseName = SanitizeFileName(courseName);
+        var coursePath = Path.Combine(downloadPath, safeCourseName);
+
+        // Fetch full curriculum
+        var curriculumItems = await _api.GetCurriculumAsync(courseId);
+
+        // Build chapters with all lectures selected
+        var chapters = new List<CourseChapter>();
+        int chapterIdx = 0, lectureIdx = 0;
+        CourseChapter? currentChapter = null;
+
+        foreach (var item in curriculumItems)
+        {
+            if (item.IsChapter)
+            {
+                chapterIdx++;
+                lectureIdx = 0;
+                currentChapter = new CourseChapter
+                {
+                    Id = item.Id,
+                    Index = chapterIdx,
+                    Title = item.Title,
+                    IsSelected = true
+                };
+                chapters.Add(currentChapter);
+            }
+            else if (item.IsLecture && item.IsPublished)
+            {
+                if (currentChapter == null)
+                {
+                    chapterIdx++;
+                    lectureIdx = 0;
+                    currentChapter = new CourseChapter
+                    {
+                        Id = 0,
+                        Index = chapterIdx,
+                        Title = "Introduction",
+                        IsSelected = true
+                    };
+                    chapters.Add(currentChapter);
+                }
+
+                lectureIdx++;
+                currentChapter.Lectures.Add(new CourseLecture
+                {
+                    Id = item.Id,
+                    Index = lectureIdx,
+                    Title = item.Title,
+                    AssetType = item.Asset?.AssetType ?? "Unknown",
+                    DurationSeconds = item.Asset?.TimeEstimation ?? 0,
+                    IsSelected = true
+                });
+            }
+        }
+
+        // Scan for already-downloaded files and deselect them
+        if (Directory.Exists(coursePath))
+        {
+            var existingFiles = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            foreach (var file in Directory.EnumerateFiles(coursePath, "*", SearchOption.AllDirectories))
+            {
+                if (new FileInfo(file).Length > 1024)
+                    existingFiles.Add(Path.GetFileNameWithoutExtension(file));
+            }
+
+            foreach (var chapter in chapters)
+            {
+                foreach (var lecture in chapter.Lectures)
+                {
+                    var safeName = SanitizeFileName($"{lecture.Index:D2} - {lecture.Title}");
+                    if (existingFiles.Contains(safeName))
+                    {
+                        lecture.IsDownloaded = true;
+                        lecture.IsSelected = false;
+                    }
+                }
+
+                // If all lectures in chapter are downloaded, deselect chapter
+                if (chapter.Lectures.All(l => !l.IsSelected))
+                    chapter.IsSelected = false;
+            }
+        }
+
+        // If nothing left to download, return null
+        var selectedCount = chapters.Where(c => c.IsSelected).Sum(c => c.Lectures.Count(l => l.IsSelected));
+        if (selectedCount == 0) return null;
+
+        // Start the download job
+        return StartNewJob(
+            courseId,
+            courseName,
+            chapters,
+            downloadPath,
+            settings.PreferredQuality,
+            settings.DownloadCaptions,
+            settings.CaptionLanguage,
+            settings.SkipExistingFiles);
+    }
+
     [GeneratedRegex(@"(\d+)")]
     private static partial Regex ResolutionRegex();
 }

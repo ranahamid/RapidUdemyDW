@@ -15,24 +15,39 @@
 </div>
 
 <div class="direct-link-box mb-3">
-    <div class="input-group">
-        <span class="input-group-text">🔗</span>
-        <input type="text" class="form-control" placeholder="Paste Udemy course link or slug... e.g. https://www.udemy.com/course/my-course/"
-               @bind="_directUrl" @bind:event="oninput" @onkeydown="OnDirectUrlKeyDown" />
-        <button class="btn btn-primary" @onclick="GoToDirectUrl" disabled="@(_resolvingUrl || string.IsNullOrWhiteSpace(_directUrl))">
+    <div class="d-flex gap-2 align-items-start">
+        <span class="input-group-text" style="height: auto;">🔗</span>
+        <textarea class="form-control" rows="@Math.Max(1, Math.Min(_directUrl.Split('\n').Length, 6))"
+                  placeholder="Paste one or more Udemy course links (one per line)..."
+                  @bind="_directUrl" @bind:event="oninput"
+                  style="resize: vertical; min-height: 38px;"></textarea>
+        <button class="btn btn-primary flex-shrink-0" @onclick="GoToDirectUrl"
+                disabled="@(_resolvingUrl || string.IsNullOrWhiteSpace(_directUrl))">
             @if (_resolvingUrl)
             {
-                <span class="spinner-border spinner-border-sm"></span>
+                <span class="spinner-border spinner-border-sm me-1"></span>
+                <span>@_batchProgressText</span>
             }
             else
             {
-                <span>Go ➜</span>
+                <span>⬇️ Download</span>
             }
         </button>
     </div>
-    @if (!string.IsNullOrEmpty(_directUrlError))
+    @if (_batchResults.Count > 0)
     {
-        <small class="text-danger">@_directUrlError</small>
+        <div class="mt-2" style="font-size: 0.85rem;">
+            @foreach (var result in _batchResults)
+            {
+                <div class="@(result.IsError ? "text-danger" : "text-success")">
+                    @(result.IsError ? "⚠️" : "✅") @result.Message
+                </div>
+            }
+            @if (_batchResults.Any(r => !r.IsError))
+            {
+                <a href="downloads" class="small">📥 View Downloads</a>
+            }
+        </div>
     }
 </div>
 
@@ -88,14 +103,14 @@ else
     <div class="course-grid">
         @foreach (var course in FilteredCourses)
         {
-            <div class="course-card" @onclick="() => SelectCourse(course)">
-                <div class="course-image">
+            <div class="course-card">
+                <div class="course-image" @onclick="() => SelectCourse(course)">
                     <img src="@(course.ImageMedium ?? course.ImageSmall)" alt="@course.Title" loading="lazy" />
                     <div class="course-progress-bar">
                         <div class="course-progress-fill" style="width: @course.CompletionRatio%"></div>
                     </div>
                 </div>
-                <div class="course-info">
+                <div class="course-info" @onclick="() => SelectCourse(course)">
                     <h5 class="course-title" title="@course.Title">@course.Title</h5>
                     <p class="course-meta">
                         <span>👨‍🏫 @course.InstructorNames</span>
@@ -106,9 +121,31 @@ else
                     </p>
                 </div>
                 <div class="course-action">
-                    <button class="btn btn-sm btn-primary w-100">
-                        ⬇️ Download
-                    </button>
+                    @{ var dlState = GetDownloadState(course.Id); }
+                    @if (dlState == CourseDownloadState.Downloading)
+                    {
+                        <button class="btn btn-sm btn-warning w-100" disabled>
+                            <span class="spinner-border spinner-border-sm me-1"></span> Downloading...
+                        </button>
+                    }
+                    else if (dlState == CourseDownloadState.AllDownloaded)
+                    {
+                        <button class="btn btn-sm btn-success w-100" disabled>
+                            ✅ All Downloaded
+                        </button>
+                    }
+                    else if (_courseErrors.TryGetValue(course.Id, out var errMsg))
+                    {
+                        <button class="btn btn-sm btn-danger w-100" title="@errMsg" @onclick="() => OneClickDownload(course)" @onclick:stopPropagation="true">
+                            ⚠️ Retry
+                        </button>
+                    }
+                    else
+                    {
+                        <button class="btn btn-sm btn-primary w-100" @onclick="() => OneClickDownload(course)" @onclick:stopPropagation="true">
+                            ⬇️ Download
+                        </button>
+                    }
                 </div>
             </div>
         }
@@ -125,15 +162,32 @@ else
     private string _loadingMessage = "Loading your courses...";
     private int _totalCourseCount;
 
-    // Direct URL paste
+    // Direct URL paste — supports multiple URLs (one per line)
     private string _directUrl = string.Empty;
     private bool _resolvingUrl;
-    private string? _directUrlError;
+    private string _batchProgressText = "";
+    private List<BatchResult> _batchResults = [];
+
+    private record BatchResult(string Message, bool IsError);
+
+    // One-click download state tracking
+    private readonly HashSet<long> _downloadingCourses = [];
+    private readonly HashSet<long> _allDownloadedCourses = [];
+    private readonly Dictionary<long, string> _courseErrors = [];
 
     private IEnumerable<UdemyCourse> FilteredCourses =>
         string.IsNullOrWhiteSpace(_searchText)
             ? _courses
             : _courses.Where(c => c.Title.Contains(_searchText, StringComparison.OrdinalIgnoreCase));
+
+    private enum CourseDownloadState { Ready, Downloading, AllDownloaded }
+
+    private CourseDownloadState GetDownloadState(long courseId)
+    {
+        if (_downloadingCourses.Contains(courseId)) return CourseDownloadState.Downloading;
+        if (_allDownloadedCourses.Contains(courseId)) return CourseDownloadState.AllDownloaded;
+        return CourseDownloadState.Ready;
+    }
 
     protected override async Task OnInitializedAsync()
     {
@@ -222,43 +276,104 @@ else
         Nav.NavigateTo($"course/{course.Id}");
     }
 
-    private async Task OnDirectUrlKeyDown(Microsoft.AspNetCore.Components.Web.KeyboardEventArgs e)
+    private async Task OneClickDownload(UdemyCourse course)
     {
-        if (e.Key == "Enter")
-            await GoToDirectUrl();
+        if (_downloadingCourses.Contains(course.Id)) return;
+
+        _courseErrors.Remove(course.Id);
+        _allDownloadedCourses.Remove(course.Id);
+        _downloadingCourses.Add(course.Id);
+        StateHasChanged();
+
+        try
+        {
+            var job = await DlManager.StartCourseDownloadAsync(course.Id);
+
+            if (job == null)
+            {
+                // All files already downloaded
+                _downloadingCourses.Remove(course.Id);
+                _allDownloadedCourses.Add(course.Id);
+            }
+            else
+            {
+                // Download started in background — remove "downloading" spinner
+                // The job is now tracked in DlManager.Jobs; user can see progress in Downloads page
+                _downloadingCourses.Remove(course.Id);
+            }
+        }
+        catch (Exception ex)
+        {
+            _downloadingCourses.Remove(course.Id);
+            _courseErrors[course.Id] = ex.Message;
+        }
+        finally
+        {
+            await InvokeAsync(StateHasChanged);
+        }
     }
 
     private async Task GoToDirectUrl()
     {
         if (string.IsNullOrWhiteSpace(_directUrl)) return;
 
+        // Parse all non-empty lines as separate URLs
+        var urls = _directUrl
+            .Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+            .Where(u => !string.IsNullOrWhiteSpace(u))
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToList();
+
+        if (urls.Count == 0) return;
+
         _resolvingUrl = true;
-        _directUrlError = null;
+        _batchResults = [];
+        _batchProgressText = urls.Count == 1 ? "Processing..." : $"0 / {urls.Count}";
         StateHasChanged();
 
         try
         {
-            var course = await Api.GetCourseByUrlAsync(_directUrl);
-            if (course != null)
+            for (int i = 0; i < urls.Count; i++)
             {
-                _directUrl = string.Empty;
-                Nav.NavigateTo($"course/{course.Id}");
+                var url = urls[i];
+                _batchProgressText = urls.Count == 1 ? "Processing..." : $"{i + 1} / {urls.Count}";
+                await InvokeAsync(StateHasChanged);
+
+                try
+                {
+                    var course = await Api.GetCourseByUrlAsync(url);
+                    if (course == null)
+                    {
+                        _batchResults.Add(new(TruncateUrl(url) + " — course not found or not enrolled", true));
+                        continue;
+                    }
+
+                    var job = await DlManager.StartCourseDownloadAsync(course.Id);
+
+                    if (job == null)
+                        _batchResults.Add(new($"\"{course.Title}\" — all files already downloaded", false));
+                    else
+                        _batchResults.Add(new($"\"{course.Title}\" — download started ({job.TotalTasks} files)", false));
+                }
+                catch (Exception ex)
+                {
+                    _batchResults.Add(new($"{TruncateUrl(url)} — {ex.Message}", true));
+                }
+
+                await InvokeAsync(StateHasChanged);
             }
-            else
-            {
-                _directUrlError = "Course not found. Check the URL and make sure you're enrolled.";
-            }
-        }
-        catch (Exception ex)
-        {
-            _directUrlError = $"Error: {ex.Message}";
+
+            _directUrl = string.Empty;
         }
         finally
         {
             _resolvingUrl = false;
-            StateHasChanged();
+            await InvokeAsync(StateHasChanged);
         }
     }
+
+    private static string TruncateUrl(string url) =>
+        url.Length > 60 ? url[..57] + "..." : url;
 
     private async Task RefreshCourses()
     {
