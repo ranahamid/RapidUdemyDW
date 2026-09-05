@@ -24,6 +24,15 @@ public static partial class HlsDownloader
     {
         // 1. Fetch master playlist
         var masterContent = await http.GetStringAsync(masterPlaylistUrl, ct);
+
+        // Bail out early if master playlist itself signals DRM encryption
+        if (IsEncryptedPlaylist(masterContent))
+        {
+            task.Status = DownloadStatus.Skipped;
+            task.ErrorMessage = "DRM protected — HLS stream is encrypted";
+            return;
+        }
+
         var variantUrl = SelectBestVariant(masterContent, masterPlaylistUrl, preferredQuality);
 
         if (string.IsNullOrEmpty(variantUrl))
@@ -35,6 +44,15 @@ public static partial class HlsDownloader
 
         // 2. Fetch variant playlist (contains segment URLs)
         var variantContent = await http.GetStringAsync(variantUrl, ct);
+
+        // Check for DRM encryption in the HLS playlist (AES-128 / SAMPLE-AES / Widevine)
+        if (IsEncryptedPlaylist(variantContent))
+        {
+            task.Status = DownloadStatus.Skipped;
+            task.ErrorMessage = "DRM protected — HLS stream is encrypted";
+            return;
+        }
+
         var segmentUrls = ParseSegmentUrls(variantContent, variantUrl);
 
         if (segmentUrls.Count == 0)
@@ -122,7 +140,7 @@ public static partial class HlsDownloader
         for (int i = 0; i < lines.Length; i++)
         {
             var line = lines[i].Trim();
-            if (!line.StartsWith("#EXT-X-STREAM-INF"))
+            if (!line.StartsWith("#EXT-X-STREAM-INF", StringComparison.Ordinal))
                 continue;
 
             // Parse resolution height
@@ -141,7 +159,7 @@ public static partial class HlsDownloader
             if (i + 1 < lines.Length)
             {
                 var url = lines[i + 1].Trim();
-                if (!string.IsNullOrEmpty(url) && !url.StartsWith("#"))
+                if (!string.IsNullOrEmpty(url) && !url.StartsWith('#'))
                 {
                     url = ResolveUrl(url, masterUrl);
                     variants.Add((bandwidth, height, url));
@@ -153,7 +171,7 @@ public static partial class HlsDownloader
         {
             // Not a master playlist — might be a media playlist directly
             // Check if it has #EXTINF segments
-            if (masterPlaylist.Contains("#EXTINF"))
+            if (masterPlaylist.Contains("#EXTINF", StringComparison.Ordinal))
                 return masterUrl; // The URL itself is the media playlist
             return null;
         }
@@ -188,7 +206,7 @@ public static partial class HlsDownloader
         foreach (var rawLine in mediaPlaylist.Split('\n'))
         {
             var line = rawLine.Trim();
-            if (string.IsNullOrEmpty(line) || line.StartsWith("#"))
+            if (string.IsNullOrEmpty(line) || line.StartsWith('#'))
                 continue;
 
             // This is a segment URL
@@ -202,7 +220,7 @@ public static partial class HlsDownloader
     /// </summary>
     private static string ResolveUrl(string url, string baseUrl)
     {
-        if (url.StartsWith("http://") || url.StartsWith("https://"))
+        if (url.StartsWith("http://", StringComparison.Ordinal) || url.StartsWith("https://", StringComparison.Ordinal))
             return url;
 
         var baseUri = new Uri(baseUrl);
@@ -231,6 +249,39 @@ public static partial class HlsDownloader
                 await Task.Delay(delay, ct);
             }
         }
+    }
+
+    /// <summary>
+    /// Detect DRM encryption in an HLS playlist.
+    /// Encrypted playlists contain #EXT-X-KEY with METHOD other than NONE,
+    /// or reference Widevine/PlayReady/FairPlay key systems.
+    /// </summary>
+    private static bool IsEncryptedPlaylist(string playlistContent)
+    {
+        foreach (var rawLine in playlistContent.Split('\n'))
+        {
+            var line = rawLine.Trim();
+
+            // #EXT-X-KEY:METHOD=AES-128 or METHOD=SAMPLE-AES indicates encryption
+            if (line.StartsWith("#EXT-X-KEY", StringComparison.Ordinal))
+            {
+                // METHOD=NONE means no encryption — that's fine
+                if (line.Contains("METHOD=NONE", StringComparison.OrdinalIgnoreCase))
+                    continue;
+                // Any other METHOD (AES-128, SAMPLE-AES, SAMPLE-AES-CTR) = encrypted
+                if (line.Contains("METHOD=", StringComparison.OrdinalIgnoreCase))
+                    return true;
+            }
+
+            // #EXT-X-SESSION-KEY also signals DRM in master playlists
+            if (line.StartsWith("#EXT-X-SESSION-KEY", StringComparison.Ordinal))
+                return true;
+
+            // Widevine DRM via ContentProtection / com.widevine URN
+            if (line.Contains("urn:uuid:edef8ba9-79d6-4ace-a3c8-27dcd51d21ed", StringComparison.OrdinalIgnoreCase))
+                return true;
+        }
+        return false;
     }
 
     [GeneratedRegex(@"RESOLUTION=(\d+)x(\d+)")]

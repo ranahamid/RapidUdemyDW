@@ -1,6 +1,7 @@
 using System.Net.Http.Headers;
 using System.Text.RegularExpressions;
 using RapidUdemyDW.Models;
+using Serilog;
 
 namespace RapidUdemyDW.Services;
 
@@ -362,7 +363,7 @@ public partial class DownloadManager
             task.Status = DownloadStatus.Downloading;
             NotifyStateChangedImmediate();
 
-            var lecture = await _api.GetLectureAsync(job.CourseId, task.LectureId);
+            var lecture = await _api.GetLectureAsync(job.CourseId, task.LectureId, ct);
             if (lecture?.Asset == null)
             {
                 task.Status = DownloadStatus.Skipped;
@@ -405,10 +406,25 @@ public partial class DownloadManager
             task.Status = DownloadStatus.Failed;
             task.ErrorMessage = "Cancelled";
         }
+        catch (AuthenticationExpiredException)
+        {
+            task.Status = DownloadStatus.Failed;
+            task.ErrorMessage = "Authentication expired — update your token in Settings";
+        }
+        catch (IOException ex) when (ex.HResult == -2147024784 /* ERROR_DISK_FULL */
+            || ex.Message.Contains("disk", StringComparison.OrdinalIgnoreCase))
+        {
+            task.Status = DownloadStatus.Failed;
+            task.ErrorMessage = "Disk full — free space and retry";
+            // Cancel remaining tasks in this job to avoid repeated failures
+            job.Cts?.Cancel();
+        }
         catch (Exception ex)
         {
             task.Status = DownloadStatus.Failed;
-            task.ErrorMessage = ex.Message;
+            task.ErrorMessage = InputValidator.RedactSecrets(ex.Message);
+            Log.Warning("Download failed for lecture {LectureId}: {Error}",
+                task.LectureId, InputValidator.RedactSecrets(ex.ToString()));
         }
         finally
         {
@@ -428,6 +444,7 @@ public partial class DownloadManager
         string? hlsUrl = null;
         string ext = ".mp4";
 
+        // 1. Prefer direct download URLs (these are never DRM-encrypted)
         if (asset.DownloadUrls?.Video is { Count: > 0 })
         {
             var vids = asset.DownloadUrls.Video.OrderByDescending(v => ParseResolution(v.Label)).ToList();
@@ -435,9 +452,11 @@ public partial class DownloadManager
             videoUrl = preferred.Src;
         }
 
+        // 2. Try unprotected MP4 media sources (skip DRM-encrypted DASH/MPD sources)
         if (string.IsNullOrEmpty(videoUrl) && asset.MediaSources is { Count: > 0 })
         {
-            var mp4Sources = asset.MediaSources.Where(m => m.Type == "video/mp4")
+            var mp4Sources = asset.UnprotectedMediaSources
+                .Where(m => m.Type == "video/mp4")
                 .OrderByDescending(m => ParseResolution(m.Label)).ToList();
             if (mp4Sources.Count > 0)
             {
@@ -446,10 +465,22 @@ public partial class DownloadManager
             }
         }
 
+        // 3. Try unprotected HLS sources (skip encrypted HLS with EXT-X-KEY)
         if (string.IsNullOrEmpty(videoUrl) && asset.MediaSources is { Count: > 0 })
         {
-            var hls = asset.MediaSources.FirstOrDefault(m => m.Type == "application/x-mpegURL");
+            var hls = asset.UnprotectedMediaSources
+                .FirstOrDefault(m => m.Type == "application/x-mpegURL");
             if (hls != null) hlsUrl = hls.Src;
+        }
+
+        // 4. If no unprotected source found and asset has DRM, skip with clear message
+        if (string.IsNullOrEmpty(videoUrl) && string.IsNullOrEmpty(hlsUrl) && asset.IsDrmProtected)
+        {
+            task.Status = DownloadStatus.Skipped;
+            task.ErrorMessage = "DRM protected — cannot download encrypted video";
+            Log.Information("Skipping DRM-protected lecture {LectureId}: {Title}",
+                task.LectureId, task.LectureTitle);
+            return;
         }
 
         var isHls = !string.IsNullOrEmpty(hlsUrl) && string.IsNullOrEmpty(videoUrl);
@@ -544,8 +575,27 @@ public partial class DownloadManager
         var dir = Path.GetDirectoryName(filePath);
         if (!string.IsNullOrEmpty(dir)) Directory.CreateDirectory(dir);
 
+        // Validate output path is within expected directory
+        var (pathValid, pathError) = InputValidator.ValidatePath(filePath, dir);
+        if (!pathValid)
+            throw new InvalidOperationException($"Unsafe file path: {pathError}");
+
         using var response = await _http.GetAsync(url, HttpCompletionOption.ResponseHeadersRead, ct);
+
+        // Handle authentication failures
+        if (response.StatusCode is System.Net.HttpStatusCode.Unauthorized or System.Net.HttpStatusCode.Forbidden)
+            throw new AuthenticationExpiredException();
+
         response.EnsureSuccessStatusCode();
+
+        // Check disk space before downloading
+        var contentLength = response.Content.Headers.ContentLength ?? 0;
+        if (contentLength > 0)
+        {
+            var (hasSpace, available) = SafeFileWriter.CheckDiskSpace(filePath, contentLength);
+            if (!hasSpace)
+                throw new IOException($"Insufficient disk space. Need {contentLength / 1048576.0:F1} MB, have {available / 1048576.0:F1} MB available.");
+        }
 
         var totalBytes = response.Content.Headers.ContentLength ?? 0;
         task.TotalBytes = totalBytes;
@@ -587,12 +637,7 @@ public partial class DownloadManager
         return match.Success ? int.Parse(match.Groups[1].Value) : 0;
     }
 
-    public static string SanitizeFileName(string name)
-    {
-        var invalid = Path.GetInvalidFileNameChars();
-        var sanitized = new string(name.Select(c => invalid.Contains(c) ? '_' : c).ToArray());
-        return sanitized.Trim().TrimEnd('.');
-    }
+    public static string SanitizeFileName(string name) => InputValidator.SanitizeFileName(name);
 
     private void NotifyStateChanged()
     {

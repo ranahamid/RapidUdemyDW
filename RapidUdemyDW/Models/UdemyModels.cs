@@ -127,6 +127,21 @@ public class UdemyAsset
     [JsonPropertyName("download_urls")]
     public UdemyDownloadUrls? DownloadUrls { get; set; }
 
+    /// <summary>Presence of this token indicates Widevine DRM protection.</summary>
+    [JsonPropertyName("media_license_token")]
+    public string? MediaLicenseToken { get; set; }
+
+    /// <summary>True if the asset has DRM-protected media sources only (no unprotected MP4/HLS).</summary>
+    [JsonIgnore]
+    public bool IsDrmProtected =>
+        !string.IsNullOrEmpty(MediaLicenseToken) ||
+        (MediaSources?.All(m => m.IsEncrypted) ?? false);
+
+    /// <summary>Returns non-encrypted media sources, filtering out DRM-protected streams.</summary>
+    [JsonIgnore]
+    public List<UdemyMediaSource> UnprotectedMediaSources =>
+        MediaSources?.Where(m => !m.IsEncrypted).ToList() ?? [];
+
     // For supplementary assets / articles
     [JsonPropertyName("body")]
     public string? Body { get; set; }
@@ -142,6 +157,13 @@ public class UdemyMediaSource
 
     [JsonPropertyName("label")]
     public string Label { get; set; } = string.Empty;
+
+    /// <summary>True if this source is DRM-encrypted (Widevine/PlayReady).</summary>
+    [JsonIgnore]
+    public bool IsEncrypted =>
+        Type.Contains("dash", StringComparison.OrdinalIgnoreCase) ||
+        Type.Contains("drm", StringComparison.OrdinalIgnoreCase) ||
+        Src.Contains(".mpd", StringComparison.OrdinalIgnoreCase);
 }
 
 public class UdemyCaption
@@ -207,6 +229,9 @@ public class CourseLecture
     public bool IsSelected { get; set; } = true;
     public bool IsDownloaded { get; set; }
     public bool HasCaptions { get; set; }
+
+    /// <summary>True if the lecture is DRM-protected and cannot be downloaded.</summary>
+    public bool IsDrmProtected { get; set; }
 
     public string DurationDisplay
     {
@@ -298,7 +323,7 @@ public class AppSettings
 
     /// <summary>Legacy: token from old JSON files. Used for one-time migration to SecureStorage.</summary>
     [JsonPropertyName("AccessToken")]
-    public string? _legacyToken { get; set; }
+    public string? LegacyToken { get; set; }
 
     public string DownloadPath { get; set; } = string.Empty;
     public string PreferredQuality { get; set; } = "1080";

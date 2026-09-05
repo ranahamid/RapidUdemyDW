@@ -1,0 +1,65 @@
+name: CI
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main ]
+
+env:
+  DOTNET_VERSION: '10.0.x'
+  DOTNET_NOLOGO: true
+  DOTNET_CLI_TELEMETRY_OPTOUT: true
+
+jobs:
+  build-and-test:
+    name: Build & Test
+    runs-on: windows-latest
+
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v4
+
+    - name: Setup .NET
+      uses: actions/setup-dotnet@v4
+      with:
+        dotnet-version: ${{ env.DOTNET_VERSION }}
+
+    - name: Install MAUI workload
+      run: dotnet workload install maui-windows
+
+    - name: Restore dependencies
+      run: dotnet restore RapidUdemyDW/RapidUdemyDW.csproj -p:TargetFramework=net10.0-windows10.0.19041.0
+
+    - name: Restore test dependencies
+      run: dotnet restore RapidUdemyDW.Tests/RapidUdemyDW.Tests.csproj
+
+    - name: Build (Debug)
+      run: dotnet build RapidUdemyDW/RapidUdemyDW.csproj -f net10.0-windows10.0.19041.0 --no-restore
+
+    - name: Build (Release)
+      run: dotnet build RapidUdemyDW/RapidUdemyDW.csproj -c Release -f net10.0-windows10.0.19041.0 --no-restore
+
+    - name: Run tests
+      run: dotnet test RapidUdemyDW.Tests/RapidUdemyDW.Tests.csproj --no-restore --verbosity normal --logger "trx;LogFileName=test-results.trx"
+
+    - name: Upload test results
+      uses: actions/upload-artifact@v4
+      if: always()
+      with:
+        name: test-results
+        path: '**/TestResults/*.trx'
+
+    # NOTE: MSIX packaging requires a code signing certificate.
+    # Do NOT store certificates in the repository.
+    # Required CI secrets for packaging:
+    #   SIGNING_CERTIFICATE_BASE64 - Base64-encoded .pfx certificate
+    #   SIGNING_CERTIFICATE_PASSWORD - Certificate password
+    #
+    # Uncomment when signing certificate is available:
+    # - name: Publish
+    #   run: |
+    #     dotnet publish RapidUdemyDW/RapidUdemyDW.csproj `
+    #       -c Release `
+    #       -f net10.0-windows10.0.19041.0 `
+    #       --no-restore

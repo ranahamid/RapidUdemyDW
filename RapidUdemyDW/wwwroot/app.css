@@ -419,6 +419,15 @@ h1:focus {
     opacity: 0.75;
 }
 
+.lecture-item.lecture-drm {
+    background: #fff8e1;
+    opacity: 0.65;
+}
+
+.lecture-item.lecture-drm .lecture-title {
+    text-decoration: line-through;
+}
+
 /* ── Download Progress ────────────────────────────────────────── */
 .download-progress-panel {
     background: #fff;

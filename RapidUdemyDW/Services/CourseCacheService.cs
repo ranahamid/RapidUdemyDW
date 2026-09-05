@@ -94,7 +94,7 @@ public class CourseCacheService
         catch { }
     }
 
-    private class CacheMeta
+    private sealed class CacheMeta
     {
         public DateTime UpdatedAt { get; set; }
         public int Count { get; set; }

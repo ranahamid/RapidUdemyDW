@@ -20,6 +20,16 @@
         <EnableDefaultCssItems>false</EnableDefaultCssItems>
         <Nullable>enable</Nullable>
 
+        <!-- Code analysis -->
+        <AnalysisLevel>latest-recommended</AnalysisLevel>
+        <EnforceCodeStyleInBuild>true</EnforceCodeStyleInBuild>
+        <TreatWarningsAsErrors Condition="'$(Configuration)' == 'Release'">true</TreatWarningsAsErrors>
+        <!-- Suppress non-critical analyzer warnings:
+             CA1822: Static suggestion for DI-registered service methods
+             CA1001: Disposable fields in DI-managed singletons (disposed by container)
+             CA1305: IFormatProvider for Serilog (uses its own formatting) -->
+        <NoWarn>CA1822;CA1001;CA1305</NoWarn>
+
         <!-- Enable XAML source generation for faster build times and improved performance.
              This generates C# code from XAML at compile time instead of runtime inflation.
              To disable, remove this line.

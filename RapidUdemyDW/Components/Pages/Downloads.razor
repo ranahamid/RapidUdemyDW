@@ -156,7 +156,14 @@ else if (_autoRetryCount > 0 && !DlManager.IsRunning)
                                 @if (!string.IsNullOrEmpty(task.ErrorMessage))
                                 {
                                     <div class="d-flex align-items-center gap-2">
-                                        <small class="text-muted">@task.ErrorMessage</small>
+                                        @if (task.ErrorMessage.Contains("DRM", StringComparison.OrdinalIgnoreCase))
+                                        {
+                                            <small class="text-warning">🔒 @task.ErrorMessage</small>
+                                        }
+                                        else
+                                        {
+                                            <small class="text-muted">@task.ErrorMessage</small>
+                                        }
                                         @if (task.Status == DownloadStatus.Failed && !job.IsRunning)
                                         {
                                             <button class="btn btn-outline-warning btn-sm" style="font-size: 0.65rem; padding: 0 0.4rem;"

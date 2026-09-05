@@ -35,6 +35,13 @@ else
         </div>
     }
 
+    @if (DrmLectureCount > 0)
+    {
+        <div class="alert alert-warning d-flex align-items-center">
+            <span>🔒 <strong>@DrmLectureCount lecture(s)</strong> are DRM-protected and cannot be downloaded. These have been automatically deselected.</span>
+        </div>
+    }
+
     <!-- Chapter / Lecture Selection View -->
     <div class="selection-toolbar mb-3">
         <div class="d-flex flex-wrap gap-2 align-items-center">
@@ -68,6 +75,7 @@ else
                     </div>
                     <div class="d-flex align-items-center gap-1">
                         @{ var dlCount = chapter.Lectures.Count(l => l.IsDownloaded); }
+                        @{ var drmCount = chapter.Lectures.Count(l => l.IsDrmProtected); }
                         @if (dlCount > 0)
                         {
                             <span class="badge bg-success" style="font-size: 0.7rem;">@dlCount / @chapter.Lectures.Count ✅</span>
@@ -75,6 +83,10 @@ else
                         else
                         {
                             <span class="badge bg-secondary">@chapter.Lectures.Count lectures</span>
+                        }
+                        @if (drmCount > 0)
+                        {
+                            <span class="badge bg-warning text-dark" style="font-size: 0.7rem;">🔒 @drmCount DRM</span>
                         }
                     </div>
                 </div>
@@ -84,13 +96,18 @@ else
                     <div class="lecture-list">
                         @foreach (var lecture in chapter.Lectures)
                         {
-                            <div class="lecture-item @(lecture.IsDownloaded ? "lecture-downloaded" : "")">
+                            <div class="lecture-item @(lecture.IsDownloaded ? "lecture-downloaded" : "") @(lecture.IsDrmProtected ? "lecture-drm" : "")">
                                 <input type="checkbox" class="form-check-input me-2"
                                        checked="@lecture.IsSelected"
+                                       disabled="@lecture.IsDrmProtected"
                                        @onchange="e => lecture.IsSelected = (bool)(e.Value ?? false)" />
                                 <span class="lecture-type-icon">@GetAssetTypeIcon(lecture.AssetType)</span>
-                                <span class="lecture-title">@lecture.Index. @lecture.Title</span>
-                                @if (lecture.IsDownloaded)
+                                <span class="lecture-title @(lecture.IsDrmProtected ? "text-muted" : "")">@lecture.Index. @lecture.Title</span>
+                                @if (lecture.IsDrmProtected)
+                                {
+                                    <span class="badge bg-warning text-dark ms-2" style="font-size: 0.7rem;" title="This lecture is DRM-protected and cannot be downloaded">🔒 DRM</span>
+                                }
+                                else if (lecture.IsDownloaded)
                                 {
                                     <span class="badge bg-success ms-2" style="font-size: 0.7rem;">✅ Downloaded</span>
                                 }
@@ -115,9 +132,10 @@ else
     private HashSet<long> _expandedChapters = [];
 
     private int TotalLectureCount => _chapters.Sum(c => c.Lectures.Count);
+    private int DrmLectureCount => _chapters.Sum(c => c.Lectures.Count(l => l.IsDrmProtected));
     private int SelectedLectureCount => _chapters
         .Where(c => c.IsSelected)
-        .Sum(c => c.Lectures.Count(l => l.IsSelected));
+        .Sum(c => c.Lectures.Count(l => l.IsSelected && !l.IsDrmProtected));
 
     protected override async Task OnInitializedAsync()
     {
@@ -211,6 +229,9 @@ else
             // Expand first chapter by default
             if (_chapters.Count > 0)
                 _expandedChapters.Add(_chapters[0].Id);
+
+            // Probe DRM status for video lectures (runs after page renders)
+            _ = ProbeDrmStatusAsync();
         }
         catch (Exception ex)
         {
@@ -264,6 +285,54 @@ else
         catch { /* non-critical */ }
     }
 
+    /// <summary>
+    /// Probe a sample of video lectures to detect DRM protection.
+    /// If any sampled lecture is DRM-protected, mark ALL video lectures as DRM.
+    /// (Udemy applies DRM per-course, not per-lecture.)
+    /// </summary>
+    private async Task ProbeDrmStatusAsync()
+    {
+        try
+        {
+            var videoLectures = _chapters
+                .SelectMany(c => c.Lectures)
+                .Where(l => l.AssetType == "Video" && !l.IsDownloaded)
+                .ToList();
+
+            if (videoLectures.Count == 0) return;
+
+            // Sample up to 2 video lectures to detect DRM (minimize API calls)
+            var samples = videoLectures.Take(2).ToList();
+            bool courseIsDrm = false;
+
+            foreach (var sample in samples)
+            {
+                try
+                {
+                    var lecture = await Api.GetLectureAsync(CourseId, sample.Id);
+                    if (lecture?.Asset?.IsDrmProtected == true)
+                    {
+                        courseIsDrm = true;
+                        break;
+                    }
+                }
+                catch { /* non-critical — skip probe on error */ }
+            }
+
+            if (courseIsDrm)
+            {
+                // Udemy DRM is per-course — mark all video lectures as DRM-protected
+                foreach (var lecture in videoLectures)
+                {
+                    lecture.IsDrmProtected = true;
+                    lecture.IsSelected = false; // Auto-deselect DRM lectures
+                }
+                await InvokeAsync(StateHasChanged);
+            }
+        }
+        catch { /* non-critical */ }
+    }
+
     private async Task StartDownload()
     {
         var settings = await SettingsHelper.LoadAsync();
@@ -290,7 +359,8 @@ else
         foreach (var ch in _chapters)
         {
             ch.IsSelected = true;
-            foreach (var l in ch.Lectures) l.IsSelected = true;
+            foreach (var l in ch.Lectures)
+                l.IsSelected = !l.IsDrmProtected; // Skip DRM lectures
         }
     }
 
@@ -306,7 +376,8 @@ else
     private void ToggleChapter(CourseChapter chapter, bool selected)
     {
         chapter.IsSelected = selected;
-        foreach (var l in chapter.Lectures) l.IsSelected = selected;
+        foreach (var l in chapter.Lectures)
+            l.IsSelected = selected && !l.IsDrmProtected; // Skip DRM lectures
     }
 
     private void ToggleChapterExpand(CourseChapter chapter)

@@ -62,19 +62,22 @@ namespace RapidUdemyDW
             builder.Logging.AddSerilog(Log.Logger, dispose: true);
 
             // Register Udemy services
-            // Use HttpClientHandler with UseCookies=false so we can send our own Cookie header
+            // Use HttpClientHandler with UseCookies=false so we can send our own Cookie header.
+            // Wrap with HttpRetryHandler for transient failure resilience.
             builder.Services.AddSingleton<UdemyApiService>(sp =>
             {
-                var handler = new HttpClientHandler { UseCookies = false };
-                var http = new HttpClient(handler) { Timeout = TimeSpan.FromSeconds(60) };
+                var innerHandler = new HttpClientHandler { UseCookies = false };
+                var retryHandler = new HttpRetryHandler { InnerHandler = innerHandler };
+                var http = new HttpClient(retryHandler) { Timeout = TimeSpan.FromSeconds(60) };
                 return new UdemyApiService(http);
             });
             builder.Services.AddSingleton<DownloadHistoryService>();
+            builder.Services.AddSingleton<CourseCacheService>();
             builder.Services.AddSingleton<DownloadManager>(sp =>
             {
                 var api = sp.GetRequiredService<UdemyApiService>();
                 var history = sp.GetRequiredService<DownloadHistoryService>();
-                var handler = new SocketsHttpHandler
+                var downloadHandler = new SocketsHttpHandler
                 {
                     MaxConnectionsPerServer = 16,
                     PooledConnectionLifetime = TimeSpan.FromMinutes(10),
@@ -89,7 +92,9 @@ namespace RapidUdemyDW
                     ConnectTimeout = TimeSpan.FromSeconds(30),
                     ResponseDrainTimeout = TimeSpan.FromSeconds(5),
                 };
-                var http = new HttpClient(handler) { Timeout = TimeSpan.FromHours(2) };
+                // Wrap with retry handler for download resilience
+                var retryHandler = new HttpRetryHandler { InnerHandler = downloadHandler };
+                var http = new HttpClient(retryHandler) { Timeout = TimeSpan.FromHours(2) };
                 // Must use the same mobile UA to bypass Cloudflare for HLS m3u8 fetches
                 http.DefaultRequestHeaders.TryAddWithoutValidation("User-Agent", AppConstants.MobileUserAgent);
                 http.DefaultRequestHeaders.Add("Accept", "*/*");

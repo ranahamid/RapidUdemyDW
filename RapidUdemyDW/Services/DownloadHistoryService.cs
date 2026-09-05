@@ -1,10 +1,12 @@
 using System.Text.Json;
 using RapidUdemyDW.Models;
+using Serilog;
 
 namespace RapidUdemyDW.Services;
 
 /// <summary>
 /// Persists download history to a local JSON file so it survives app restarts.
+/// Uses atomic writes and backup recovery to prevent data corruption.
 /// </summary>
 public class DownloadHistoryService
 {
@@ -14,6 +16,12 @@ public class DownloadHistoryService
 
     private List<DownloadSession>? _sessions;
     private readonly SemaphoreSlim _lock = new(1, 1);
+
+    /// <summary>Maximum number of sessions to retain.</summary>
+    private const int MaxRetainedSessions = 50;
+
+    /// <summary>Maximum age for history entries before cleanup.</summary>
+    private static readonly TimeSpan MaxRetention = TimeSpan.FromDays(90);
 
     /// <summary>
     /// Get all download sessions (most recent first).
@@ -28,9 +36,10 @@ public class DownloadHistoryService
         {
             if (_sessions != null) return _sessions;
 
-            if (File.Exists(HistoryPath))
+            // Use recovery-aware read (tries backup if main file corrupt)
+            var json = await SafeFileWriter.ReadWithRecoveryAsync(HistoryPath);
+            if (!string.IsNullOrEmpty(json))
             {
-                var json = await File.ReadAllTextAsync(HistoryPath);
                 var loaded = JsonSerializer.Deserialize<List<DownloadSession>>(json, JsonOpts) ?? [];
 
                 // Deduplicate: keep only the most recent session per course
@@ -40,9 +49,14 @@ public class DownloadHistoryService
                     .OrderByDescending(s => s.StartedAt)
                     .ToList();
 
-                // If we removed duplicates, save the clean version
+                // Apply retention policy
+                var cutoff = DateTime.UtcNow - MaxRetention;
+                var beforeCount = _sessions.Count;
+                _sessions.RemoveAll(s => s.StartedAt < cutoff);
+
+                // If we cleaned up, save
                 if (_sessions.Count != loaded.Count)
-                    _ = SaveAsync();
+                    await SaveAsync();
             }
             else
             {
@@ -162,14 +176,13 @@ public class DownloadHistoryService
         await _lock.WaitAsync();
         try
         {
-            var dir = Path.GetDirectoryName(HistoryPath);
-            if (!string.IsNullOrEmpty(dir))
-                Directory.CreateDirectory(dir);
-
             var json = JsonSerializer.Serialize(_sessions ?? [], JsonOpts);
-            await File.WriteAllTextAsync(HistoryPath, json);
+            await SafeFileWriter.WriteAllTextAtomicAsync(HistoryPath, json);
         }
-        catch { /* non-critical */ }
+        catch (Exception ex)
+        {
+            Log.Warning(ex, "Failed to save download history");
+        }
         finally
         {
             _lock.Release();

@@ -1,3 +1,4 @@
 <Solution>
   <Project Path="RapidUdemyDW/RapidUdemyDW.csproj" />
+  <Project Path="RapidUdemyDW.Tests/RapidUdemyDW.Tests.csproj" />
 </Solution>

@@ -118,6 +118,31 @@
     }
 </div>
 
+<div class="settings-card mt-3">
+    <h5>🔒 Privacy & Data</h5>
+    <p class="text-muted small">
+        This application stores all data locally on your device. No telemetry or analytics are collected.
+        See the <a href="about">About</a> page for storage details.
+    </p>
+    <div class="d-flex gap-2 flex-wrap">
+        <button class="btn btn-outline-danger btn-sm" @onclick="ConfirmResetData" disabled="@_resettingData">
+            @if (_resettingData)
+            {
+                <span class="spinner-border spinner-border-sm me-1"></span>
+            }
+            🗑️ Reset All Data
+        </button>
+        @if (_showResetConfirm)
+        {
+            <div class="alert alert-danger d-inline-flex align-items-center gap-2 mb-0 py-1 px-3">
+                <span>⚠️ This will delete all settings, history, cache, and tokens. Are you sure?</span>
+                <button class="btn btn-danger btn-sm" @onclick="ResetAllData">Yes, Delete Everything</button>
+                <button class="btn btn-outline-secondary btn-sm" @onclick="() => _showResetConfirm = false">Cancel</button>
+            </div>
+        }
+    </div>
+</div>
+
 <div class="mt-4 d-flex gap-2">
     <button class="btn btn-primary" @onclick="SaveSettings">
         💾 Save Settings
@@ -135,6 +160,8 @@
     private string? _tokenUserName;
     private string? _message;
     private bool _isError;
+    private bool _showResetConfirm;
+    private bool _resettingData;
 
     protected override async Task OnInitializedAsync()
     {
@@ -221,6 +248,33 @@
         {
             _message = $"Failed to save: {ex.Message}";
             _isError = true;
+        }
+    }
+
+    private void ConfirmResetData() => _showResetConfirm = true;
+
+    private async Task ResetAllData()
+    {
+        _showResetConfirm = false;
+        _resettingData = true;
+        StateHasChanged();
+
+        try
+        {
+            await SettingsHelper.ResetAllDataAsync();
+            _message = "✅ All data has been reset. Restart the application.";
+            _isError = false;
+            _settings = new AppSettings();
+        }
+        catch (Exception ex)
+        {
+            _message = $"Failed to reset: {ex.Message}";
+            _isError = true;
+        }
+        finally
+        {
+            _resettingData = false;
+            StateHasChanged();
         }
     }
 
